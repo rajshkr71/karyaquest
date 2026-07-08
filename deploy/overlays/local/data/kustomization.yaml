@@ -6,3 +6,6 @@ resources:
   - ../../../base/redis
   - ../../../base/minio
   - ../../../base/temporal
+
+generators:
+  - secret-generator.yaml
