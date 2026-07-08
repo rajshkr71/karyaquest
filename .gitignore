@@ -1,0 +1,29 @@
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Secrets / credentials
+*.key
+*.pem
+*.kubeconfig
+kubeconfig
+secrets.local.*
+*.agekey
+
+# Generated files
+tmp/
+.cache/
