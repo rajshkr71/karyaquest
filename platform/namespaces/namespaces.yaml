@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: karyaquest-platform
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: karyaquest-data
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: karyaquest-services
