@@ -3,6 +3,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from agent_api.applications import router as applications_router
 from agent_api.db import check_postgres_ready, list_public_tables
 from agent_api.generated_documents import router as generated_documents_router
+from agent_api.job_scores import job_router as job_scoring_router
 from agent_api.job_scores import router as job_scores_router
 from agent_api.jobs import router as jobs_router
 from agent_api.profiles import router as profiles_router
@@ -13,6 +14,7 @@ app = FastAPI(title="KaryaQuest Agent API")
 app.include_router(applications_router)
 app.include_router(generated_documents_router)
 app.include_router(job_scores_router)
+app.include_router(job_scoring_router)
 app.include_router(jobs_router)
 app.include_router(profiles_router)
 app.include_router(resumes_router)
