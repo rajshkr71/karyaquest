@@ -126,6 +126,40 @@ def create_job(settings: Settings, values: dict[str, Any]) -> dict[str, Any]:
             return job
 
 
+def create_manual_job(
+    settings: Settings,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    columns = list(values)
+    parameters = [
+        Jsonb(value) if column.endswith("_skills") else value
+        for column, value in values.items()
+    ]
+    placeholders = ", ".join(["%s"] * len(columns))
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO jobs ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING {JOB_COLUMNS}
+                """,
+                parameters,
+            )
+            job = cur.fetchone()
+            metadata = {
+                "source_url": job["source_url"],
+                "company": job["company"],
+                "title": job["title"],
+                "status": job["status"],
+            }
+            _write_audit_log(cur, "job.imported", job["id"], metadata)
+            if job["status"] == "normalized":
+                _write_audit_log(cur, "job.normalized", job["id"], metadata)
+            return job
+
+
 def list_jobs(settings: Settings) -> list[dict[str, Any]]:
     with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
