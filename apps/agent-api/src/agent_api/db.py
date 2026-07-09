@@ -23,6 +23,11 @@ APPLICATION_COLUMNS = """
     created_at, updated_at
 """
 
+PROFILE_COLUMNS = "id, name, content, created_at, updated_at"
+RESUME_COLUMNS = (
+    "id, name, base_profile_id, content, version, created_at, updated_at"
+)
+
 
 def _write_audit_log(
     cur: Any,
@@ -260,3 +265,142 @@ def update_application(
                     target_type="application",
                 )
             return application
+
+
+def create_profile(
+    settings: Settings,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO profiles (name, content)
+                VALUES (%s, %s)
+                RETURNING {PROFILE_COLUMNS}
+                """,
+                (values["name"], Jsonb(values["content"])),
+            )
+            profile = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "profile.created",
+                profile["id"],
+                {"name": profile["name"]},
+                target_type="profile",
+            )
+            return profile
+
+
+def list_profiles(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {PROFILE_COLUMNS} FROM profiles ORDER BY created_at DESC"
+            )
+            return cur.fetchall()
+
+
+def get_profile(
+    settings: Settings,
+    profile_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {PROFILE_COLUMNS} FROM profiles WHERE id = %s",
+                (profile_id,),
+            )
+            return cur.fetchone()
+
+
+def update_profile(
+    settings: Settings,
+    profile_id: UUID,
+    values: dict[str, Any],
+) -> dict[str, Any] | None:
+    assignments = ", ".join(f"{column} = %s" for column in values)
+    parameters = [
+        Jsonb(value) if column == "content" else value
+        for column, value in values.items()
+    ]
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE profiles
+                SET {assignments}, updated_at = now()
+                WHERE id = %s
+                RETURNING {PROFILE_COLUMNS}
+                """,
+                [*parameters, profile_id],
+            )
+            profile = cur.fetchone()
+            if profile is not None:
+                _write_audit_log(
+                    cur,
+                    "profile.updated",
+                    profile_id,
+                    {"changed_fields": list(values)},
+                    target_type="profile",
+                )
+            return profile
+
+
+def create_resume(
+    settings: Settings,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    columns = list(values)
+    placeholders = ", ".join(["%s"] * len(columns))
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO resumes ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING {RESUME_COLUMNS}
+                """,
+                list(values.values()),
+            )
+            resume = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "resume.created",
+                resume["id"],
+                {
+                    "name": resume["name"],
+                    "base_profile_id": (
+                        str(resume["base_profile_id"])
+                        if resume["base_profile_id"] is not None
+                        else None
+                    ),
+                    "version": resume["version"],
+                },
+                target_type="resume",
+            )
+            return resume
+
+
+def list_resumes(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {RESUME_COLUMNS} FROM resumes ORDER BY created_at DESC"
+            )
+            return cur.fetchall()
+
+
+def get_resume(
+    settings: Settings,
+    resume_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {RESUME_COLUMNS} FROM resumes WHERE id = %s",
+                (resume_id,),
+            )
+            return cur.fetchone()
