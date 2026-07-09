@@ -1,10 +1,17 @@
+import json
+import re
+from html import unescape
+from html.parser import HTMLParser
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from psycopg.errors import UniqueViolation
 
-from agent_api.db import create_manual_job
+from agent_api.db import create_manual_job, job_source_url_exists
 from agent_api.jobs import Job
 from agent_api.settings import Settings, get_settings
 
@@ -22,6 +29,29 @@ class ManualJobImport(BaseModel):
     description: str | None = None
     required_skills: list[str] | None = None
     preferred_skills: list[str] | None = None
+
+
+class GreenhouseImport(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    board_token: str | None = None
+    job_url: str | None = None
+
+    @model_validator(mode="after")
+    def require_one_source(self) -> "GreenhouseImport":
+        if (self.board_token is None) == (self.job_url is None):
+            raise ValueError("provide exactly one of board_token or job_url")
+        return self
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        if text := data.strip():
+            self.parts.append(text)
 
 
 def _clean_text(value: str | None) -> str | None:
@@ -56,6 +86,73 @@ def normalize_manual_job(payload: ManualJobImport) -> dict[str, Any]:
     }
 
 
+def _parse_greenhouse_source(payload: GreenhouseImport) -> tuple[str, int | None]:
+    if payload.board_token is not None:
+        token = payload.board_token
+        job_id = None
+    else:
+        parsed = urlparse(payload.job_url or "")
+        if parsed.scheme != "https" or parsed.hostname not in {
+            "boards.greenhouse.io",
+            "job-boards.greenhouse.io",
+        }:
+            raise ValueError("job_url must be a public Greenhouse job URL")
+        match = re.fullmatch(r"/([^/]+)/jobs/(\d+)/?", parsed.path)
+        if match is None:
+            raise ValueError("job_url must include a board token and job ID")
+        token, raw_job_id = match.groups()
+        job_id = int(raw_job_id)
+
+    if re.fullmatch(r"[A-Za-z0-9_-]+", token) is None:
+        raise ValueError("invalid Greenhouse board token")
+    return token, job_id
+
+
+def _fetch_greenhouse_json(path: str) -> dict[str, Any]:
+    request = Request(
+        f"https://boards-api.greenhouse.io/v1/{path}",
+        headers={"User-Agent": "KaryaQuest/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            return json.load(response)
+    except (HTTPError, URLError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Greenhouse job data could not be fetched",
+        ) from exc
+
+
+def _plain_text(content: str) -> str:
+    parser = _TextExtractor()
+    parser.feed(unescape(content))
+    return " ".join(parser.parts)
+
+
+def _normalize_greenhouse_job(
+    job: dict[str, Any],
+    company: str,
+) -> dict[str, Any]:
+    description = _plain_text(str(job.get("content") or ""))
+    source_url = str(job.get("absolute_url") or "").strip()
+    title = str(job.get("title") or "").strip()
+    location = job.get("location") or {}
+    location_name = str(location.get("name") or "").strip() or None
+    normalized = all((source_url, company, title, description))
+    return {
+        "source": "greenhouse",
+        "source_url": source_url,
+        "company": company or "Unknown company",
+        "title": title or "Untitled position",
+        "location": location_name,
+        "remote_type": None,
+        "description": description or "Description not provided",
+        "required_skills": [],
+        "preferred_skills": [],
+        "status": "normalized" if normalized else "needs_review",
+    }
+
+
 @router.post(
     "/manual",
     response_model=Job,
@@ -67,6 +164,65 @@ def import_manual_job(
 ) -> Job:
     try:
         return create_manual_job(settings, normalize_manual_job(payload))
+    except UniqueViolation as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="a job with this source URL already exists",
+        ) from exc
+
+
+@router.post(
+    "/greenhouse",
+    response_model=list[Job],
+    status_code=status.HTTP_201_CREATED,
+)
+def import_greenhouse_jobs(
+    payload: GreenhouseImport,
+    settings: Settings = Depends(get_settings),
+) -> list[Job]:
+    try:
+        board_token, job_id = _parse_greenhouse_source(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    token = quote(board_token, safe="")
+    board = _fetch_greenhouse_json(f"boards/{token}")
+    company = str(board.get("name") or "").strip()
+    if job_id is None:
+        response = _fetch_greenhouse_json(f"boards/{token}/jobs?content=true")
+        jobs = response.get("jobs")
+        if not isinstance(jobs, list):
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Greenhouse returned invalid job data",
+            )
+    else:
+        jobs = [_fetch_greenhouse_json(f"boards/{token}/jobs/{job_id}")]
+
+    values = [_normalize_greenhouse_job(job, company) for job in jobs]
+    if any(not item["source_url"] for item in values):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Greenhouse returned a job without a source URL",
+        )
+    if any(
+        job_source_url_exists(
+            settings,
+            item["source"],
+            item["source_url"],
+        )
+        for item in values
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="a Greenhouse job with this source URL already exists",
+        )
+
+    try:
+        return [create_manual_job(settings, item) for item in values]
     except UniqueViolation as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
