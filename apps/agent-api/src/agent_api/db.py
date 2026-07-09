@@ -17,19 +17,26 @@ JOB_COLUMNS = """
     detected_seniority, status, created_at, updated_at
 """
 
+APPLICATION_COLUMNS = """
+    id, job_id, status, application_url, submitted_at, failure_reason,
+    manual_required_reason, resume_document_id, cover_letter_document_id,
+    created_at, updated_at
+"""
+
 
 def _write_audit_log(
     cur: Any,
     action: str,
-    job_id: UUID,
+    target_id: UUID,
     metadata: dict[str, Any],
+    target_type: str = "job",
 ) -> None:
     cur.execute(
         """
         INSERT INTO audit_logs (actor, action, target_type, target_id, metadata)
-        VALUES ('system', %s, 'job', %s, %s)
+        VALUES ('system', %s, %s, %s, %s)
         """,
-        (action, job_id, Jsonb(metadata)),
+        (action, target_type, target_id, Jsonb(metadata)),
     )
 
 
@@ -167,3 +174,89 @@ def delete_job(settings: Settings, job_id: UUID) -> bool:
                 return False
             _write_audit_log(cur, "job.deleted", job_id, job)
             return True
+
+
+def create_application(
+    settings: Settings,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    columns = list(values)
+    placeholders = ", ".join(["%s"] * len(columns))
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO applications ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING {APPLICATION_COLUMNS}
+                """,
+                list(values.values()),
+            )
+            return cur.fetchone()
+
+
+def list_applications(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {APPLICATION_COLUMNS}
+                FROM applications
+                ORDER BY created_at DESC
+                """
+            )
+            return cur.fetchall()
+
+
+def get_application(
+    settings: Settings,
+    application_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {APPLICATION_COLUMNS} FROM applications WHERE id = %s",
+                (application_id,),
+            )
+            return cur.fetchone()
+
+
+def update_application(
+    settings: Settings,
+    application_id: UUID,
+    values: dict[str, Any],
+) -> dict[str, Any] | None:
+    assignments = ", ".join(f"{column} = %s" for column in values)
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM applications WHERE id = %s FOR UPDATE",
+                (application_id,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                return None
+
+            cur.execute(
+                f"""
+                UPDATE applications
+                SET {assignments}, updated_at = now()
+                WHERE id = %s
+                RETURNING {APPLICATION_COLUMNS}
+                """,
+                [*values.values(), application_id],
+            )
+            application = cur.fetchone()
+            old_status = existing["status"]
+            new_status = application["status"]
+            if new_status != old_status:
+                _write_audit_log(
+                    cur,
+                    "application.status_changed",
+                    application_id,
+                    {"old_status": old_status, "new_status": new_status},
+                    target_type="application",
+                )
+            return application
