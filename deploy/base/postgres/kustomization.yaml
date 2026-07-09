@@ -4,11 +4,13 @@ kind: Kustomization
 resources:
   - postgres.yaml
   - postgres-migrate-001-initial-schema.yaml
+  - postgres-migrate-002-profiles-resumes.yaml
 
 configMapGenerator:
   - name: postgres-migrations
     files:
       - migrations/001_initial_schema.sql
+      - migrations/002_profiles_resumes.sql
 
 generatorOptions:
   disableNameSuffixHash: true
