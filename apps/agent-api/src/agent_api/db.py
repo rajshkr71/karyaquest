@@ -160,6 +160,24 @@ def create_manual_job(
             return job
 
 
+def job_source_url_exists(
+    settings: Settings,
+    source: str,
+    source_url: str,
+) -> bool:
+    with psycopg.connect(build_conninfo(settings)) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM jobs
+                WHERE source = %s AND source_url = %s
+                """,
+                (source, source_url),
+            )
+            return cur.fetchone() is not None
+
+
 def list_jobs(settings: Settings) -> list[dict[str, Any]]:
     with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
