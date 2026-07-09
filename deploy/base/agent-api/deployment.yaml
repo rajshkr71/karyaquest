@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: agent-api
-          image: karyaquest/agent-api:d3f69695f106
+          image: karyaquest/agent-api:cdf16d91cfd4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
