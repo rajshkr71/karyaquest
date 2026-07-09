@@ -7,7 +7,7 @@ spec:
         - name: sops-age
           secret:
             secretName: sops-age
-            defaultMode: 0400
+            defaultMode: 0444
       initContainers:
         - name: install-ksops
           image: viaductoss/ksops@sha256:4def9fdd4e2f850265740ebe9592c5455d19b76891e88e602df8b52d74b95334
