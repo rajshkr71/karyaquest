@@ -27,3 +27,10 @@ secrets.local.*
 # Generated files
 tmp/
 .cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
