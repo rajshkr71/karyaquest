@@ -3,3 +3,12 @@ kind: Kustomization
 
 resources:
   - postgres.yaml
+  - postgres-migrate-001-initial-schema.yaml
+
+configMapGenerator:
+  - name: postgres-migrations
+    files:
+      - migrations/001_initial_schema.sql
+
+generatorOptions:
+  disableNameSuffixHash: true
