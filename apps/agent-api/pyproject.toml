@@ -1,0 +1,21 @@
+[project]
+name = "agent-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.116.1",
+  "uvicorn[standard]==0.35.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.1",
+  "httpx==0.28.1"
+]
+
+[build-system]
+requires = ["setuptools>=80.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
