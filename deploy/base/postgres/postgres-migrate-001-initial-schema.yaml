@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: postgres-migrate-001-initial-schema
+  name: postgres-migrate-001-initial-schema-v2
   namespace: karyaquest-data
 spec:
   backoffLimit: 3
@@ -19,6 +19,11 @@ spec:
                   name: postgres-auth
                   key: POSTGRES_USER
             - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-auth
+                  key: POSTGRES_PASSWORD
+            - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
                   name: postgres-auth
