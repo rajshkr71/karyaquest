@@ -150,6 +150,11 @@ def _fetch_lever_json(path: str) -> dict[str, Any]:
     try:
         with urlopen(request, timeout=10) as response:
             data = json.load(response)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Lever job data request timed out",
+        ) from exc
     except (HTTPError, URLError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

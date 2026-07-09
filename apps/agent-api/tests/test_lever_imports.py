@@ -5,7 +5,7 @@ import pytest
 from fastapi import HTTPException
 
 from agent_api import db
-from agent_api.job_imports import LeverImport, import_lever_job
+from agent_api.job_imports import LeverImport, _fetch_lever_json, import_lever_job
 
 JOB_ID = UUID("6b9894db-523e-4e5e-bd8b-cd3b5449a642")
 NOW = datetime(2026, 7, 9, 12, 0, tzinfo=UTC)
@@ -139,6 +139,19 @@ def test_lever_token_validation_errors() -> None:
         )
 
     assert exc.value.status_code == 422
+
+
+def test_lever_fetch_timeout_returns_504(monkeypatch) -> None:
+    def timeout(request, timeout):
+        raise TimeoutError("external timeout details")
+
+    monkeypatch.setattr("agent_api.job_imports.urlopen", timeout)
+
+    with pytest.raises(HTTPException) as exc:
+        _fetch_lever_json("postings/acme/posting-123")
+
+    assert exc.value.status_code == 504
+    assert exc.value.detail == "Lever job data request timed out"
 
 
 class FakeCursor:
