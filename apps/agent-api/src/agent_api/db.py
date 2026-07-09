@@ -28,3 +28,22 @@ def check_postgres_ready(settings: Settings) -> bool:
     except Exception:
         logger.warning("Postgres readiness check failed")
         return False
+
+
+def list_public_tables(settings: Settings) -> list[str]:
+    try:
+        with psycopg.connect(build_conninfo(settings)) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_type = 'BASE TABLE'
+                    ORDER BY table_name
+                    """
+                )
+                return [row[0] for row in cur.fetchall()]
+    except Exception:
+        logger.warning("Postgres table visibility check failed")
+        return []
