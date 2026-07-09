@@ -31,6 +31,10 @@ GENERATED_DOCUMENT_COLUMNS = """
     id, job_id, resume_id, document_type, storage_path, checksum, model_used,
     created_at
 """
+JOB_SCORE_COLUMNS = """
+    id, job_id, resume_id, score, strengths, gaps, recommendation, model_used,
+    created_at
+"""
 
 
 def _write_audit_log(
@@ -477,5 +481,72 @@ def get_generated_document(
                 WHERE id = %s
                 """,
                 (document_id,),
+            )
+            return cur.fetchone()
+
+
+def create_job_score(
+    settings: Settings,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    columns = list(values)
+    parameters = [
+        Jsonb(value) if column in {"strengths", "gaps"} else value
+        for column, value in values.items()
+    ]
+    placeholders = ", ".join(["%s"] * len(columns))
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO job_scores ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING {JOB_SCORE_COLUMNS}
+                """,
+                parameters,
+            )
+            job_score = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "job.scored",
+                job_score["job_id"],
+                {
+                    "job_id": str(job_score["job_id"]),
+                    "resume_id": (
+                        str(job_score["resume_id"])
+                        if job_score["resume_id"] is not None
+                        else None
+                    ),
+                    "score": job_score["score"],
+                    "recommendation": job_score["recommendation"],
+                    "model_used": job_score["model_used"],
+                },
+            )
+            return job_score
+
+
+def list_job_scores(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {JOB_SCORE_COLUMNS}
+                FROM job_scores
+                ORDER BY created_at DESC
+                """
+            )
+            return cur.fetchall()
+
+
+def get_job_score(
+    settings: Settings,
+    score_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {JOB_SCORE_COLUMNS} FROM job_scores WHERE id = %s",
+                (score_id,),
             )
             return cur.fetchone()
