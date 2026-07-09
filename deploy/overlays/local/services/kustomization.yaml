@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - ../../../base/agent-api
+  - ../../../base/dashboard
 
 generators:
   - secret-generator.yaml
