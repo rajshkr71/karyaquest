@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-api
+  namespace: karyaquest-services
+spec:
+  type: ClusterIP
+  selector:
+    app: agent-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
