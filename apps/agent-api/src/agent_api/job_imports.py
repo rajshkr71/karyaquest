@@ -16,6 +16,7 @@ from agent_api.jobs import Job
 from agent_api.settings import Settings, get_settings
 
 router = APIRouter(prefix="/job-imports", tags=["job-imports"])
+PUBLIC_JOB_IMPORT_USER_AGENT = "KaryaQuest/1.0"
 
 
 class ManualJobImport(BaseModel):
@@ -127,39 +128,50 @@ def _parse_greenhouse_source(payload: GreenhouseImport) -> tuple[str, int | None
     return token, job_id
 
 
-def _fetch_greenhouse_json(path: str) -> dict[str, Any]:
+def _fetch_public_job_json(url: str, provider: str) -> Any:
     request = Request(
-        f"https://boards-api.greenhouse.io/v1/{path}",
-        headers={"User-Agent": "KaryaQuest/1.0"},
+        url,
+        headers={"User-Agent": PUBLIC_JOB_IMPORT_USER_AGENT},
     )
     try:
         with urlopen(request, timeout=10) as response:
             return json.load(response)
-    except (HTTPError, URLError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Greenhouse job data could not be fetched",
-        ) from exc
-
-
-def _fetch_lever_json(path: str) -> dict[str, Any]:
-    request = Request(
-        f"https://api.lever.co/v0/{path}",
-        headers={"User-Agent": "KaryaQuest/1.0"},
-    )
-    try:
-        with urlopen(request, timeout=10) as response:
-            data = json.load(response)
     except TimeoutError as exc:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Lever job data request timed out",
+            detail=f"{provider} job data request timed out",
         ) from exc
-    except (HTTPError, URLError, json.JSONDecodeError) as exc:
+    except HTTPError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Lever job data could not be fetched",
+            detail=f"{provider} job data could not be fetched",
         ) from exc
+    except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"{provider} job data request timed out",
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"{provider} job data could not be fetched",
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"{provider} returned invalid JSON",
+        ) from exc
+
+
+def _fetch_greenhouse_json(path: str) -> dict[str, Any]:
+    return _fetch_public_job_json(
+        f"https://boards-api.greenhouse.io/v1/{path}",
+        "Greenhouse",
+    )
+
+
+def _fetch_lever_json(path: str) -> dict[str, Any]:
+    data = _fetch_public_job_json(f"https://api.lever.co/v0/{path}", "Lever")
     if not isinstance(data, dict):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
