@@ -27,6 +27,10 @@ PROFILE_COLUMNS = "id, name, content, created_at, updated_at"
 RESUME_COLUMNS = (
     "id, name, base_profile_id, content, version, created_at, updated_at"
 )
+GENERATED_DOCUMENT_COLUMNS = """
+    id, job_id, resume_id, document_type, storage_path, checksum, model_used,
+    created_at
+"""
 
 
 def _write_audit_log(
@@ -402,5 +406,76 @@ def get_resume(
             cur.execute(
                 f"SELECT {RESUME_COLUMNS} FROM resumes WHERE id = %s",
                 (resume_id,),
+            )
+            return cur.fetchone()
+
+
+def create_generated_document(
+    settings: Settings,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    columns = list(values)
+    placeholders = ", ".join(["%s"] * len(columns))
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO generated_documents ({", ".join(columns)})
+                VALUES ({placeholders})
+                RETURNING {GENERATED_DOCUMENT_COLUMNS}
+                """,
+                list(values.values()),
+            )
+            document = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "generated_document.created",
+                document["id"],
+                {
+                    "document_type": document["document_type"],
+                    "job_id": (
+                        str(document["job_id"])
+                        if document["job_id"] is not None
+                        else None
+                    ),
+                    "resume_id": (
+                        str(document["resume_id"])
+                        if document["resume_id"] is not None
+                        else None
+                    ),
+                    "checksum": document["checksum"],
+                },
+                target_type="generated_document",
+            )
+            return document
+
+
+def list_generated_documents(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {GENERATED_DOCUMENT_COLUMNS}
+                FROM generated_documents
+                ORDER BY created_at DESC
+                """
+            )
+            return cur.fetchall()
+
+
+def get_generated_document(
+    settings: Settings,
+    document_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {GENERATED_DOCUMENT_COLUMNS}
+                FROM generated_documents
+                WHERE id = %s
+                """,
+                (document_id,),
             )
             return cur.fetchone()
