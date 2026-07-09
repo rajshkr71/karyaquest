@@ -18,6 +18,21 @@ JOB_COLUMNS = """
 """
 
 
+def _write_audit_log(
+    cur: Any,
+    action: str,
+    job_id: UUID,
+    metadata: dict[str, Any],
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO audit_logs (actor, action, target_type, target_id, metadata)
+        VALUES ('system', %s, 'job', %s, %s)
+        """,
+        (action, job_id, Jsonb(metadata)),
+    )
+
+
 def build_conninfo(settings: Settings) -> str:
     return make_conninfo(
         host=settings.postgres_host,
@@ -77,7 +92,18 @@ def create_job(settings: Settings, values: dict[str, Any]) -> dict[str, Any]:
                 """,
                 parameters,
             )
-            return cur.fetchone()
+            job = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "job.created",
+                job["id"],
+                {
+                    "company": job["company"],
+                    "title": job["title"],
+                    "source": job["source"],
+                },
+            )
+            return job
 
 
 def list_jobs(settings: Settings) -> list[dict[str, Any]]:
@@ -119,11 +145,25 @@ def update_job(
                 """,
                 [*parameters, job_id],
             )
-            return cur.fetchone()
+            job = cur.fetchone()
+            if job is not None:
+                _write_audit_log(cur, "job.updated", job_id, values)
+            return job
 
 
 def delete_job(settings: Settings, job_id: UUID) -> bool:
-    with psycopg.connect(build_conninfo(settings)) as conn:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
-            return cur.rowcount == 1
+            cur.execute(
+                """
+                DELETE FROM jobs
+                WHERE id = %s
+                RETURNING company, title, source
+                """,
+                (job_id,),
+            )
+            job = cur.fetchone()
+            if job is None:
+                return False
+            _write_audit_log(cur, "job.deleted", job_id, job)
+            return True
