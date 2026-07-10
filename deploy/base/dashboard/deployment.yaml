@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: dashboard
-          image: karyaquest/dashboard:9657f6d5de2e
+          image: karyaquest/dashboard:93f8bd07e82a
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
