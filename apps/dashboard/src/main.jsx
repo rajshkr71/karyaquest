@@ -2,31 +2,87 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
+function latestScoresByJob(scores) {
+  return scores.reduce((latest, score) => {
+    const existing = latest[score.job_id];
+    const scoreCreatedAt = new Date(score.created_at).getTime();
+    const existingCreatedAt = existing ? new Date(existing.created_at).getTime() : 0;
+
+    if (!existing || scoreCreatedAt > existingCreatedAt) {
+      latest[score.job_id] = score;
+    }
+
+    return latest;
+  }, {});
+}
+
+function formatScore(score) {
+  if (!score) {
+    return "Not scored";
+  }
+  return `${score.score}/100`;
+}
+
+function formatRecommendation(score) {
+  return score?.recommendation?.replaceAll("_", " ") ?? "None yet";
+}
+
+function ScoreList({ title, items }) {
+  return (
+    <div>
+      <h4>{title}</h4>
+      {items?.length ? (
+        <ul className="scoreList">
+          {items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">None recorded.</p>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [jobs, setJobs] = useState([]);
+  const [scoresByJob, setScoresByJob] = useState({});
   const [selectedJobId, setSelectedJobId] = useState("");
-  const [status, setStatus] = useState("Loading jobs...");
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
-    fetch("/api/jobs")
-      .then((response) => {
+    const fetchJson = (url) =>
+      fetch(url).then((response) => {
         if (!response.ok) {
-          throw new Error(`API returned ${response.status}`);
+          throw new Error(`${url} returned ${response.status}`);
         }
         return response.json();
-      })
-      .then((data) => {
-        const items = Array.isArray(data) ? data : data.items ?? [];
+      });
+
+    setIsLoading(true);
+    setErrorMessage("");
+
+    Promise.all([fetchJson("/api/jobs"), fetchJson("/api/job-scores")])
+      .then(([jobsData, scoresData]) => {
+        const items = Array.isArray(jobsData) ? jobsData : jobsData.items ?? [];
+        const scores = Array.isArray(scoresData) ? scoresData : scoresData.items ?? [];
         setJobs(items);
+        setScoresByJob(latestScoresByJob(scores));
         setSelectedJobId(items[0]?.id ?? "");
-        setStatus("");
       })
       .catch((error) => {
-        setStatus(`Unable to load jobs: ${error.message}`);
+        setErrorMessage(`Unable to load dashboard data: ${error.message}`);
+        setJobs([]);
+        setScoresByJob({});
+      })
+      .finally(() => {
+        setIsLoading(false);
       });
   }, []);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
+  const selectedScore = selectedJob ? scoresByJob[selectedJob.id] : null;
 
   return (
     <main className="page">
@@ -36,7 +92,8 @@ function App() {
         <p>Review imported jobs before resume generation or application automation.</p>
       </section>
 
-      {status && <div className="status">{status}</div>}
+      {isLoading && <div className="status">Loading jobs and scores...</div>}
+      {errorMessage && <div className="status error">{errorMessage}</div>}
 
       <div className="layout">
         <section className="card">
@@ -54,31 +111,38 @@ function App() {
                   <th>Location</th>
                   <th>Status</th>
                   <th>Source</th>
+                  <th>Score</th>
+                  <th>Recommendation</th>
                 </tr>
               </thead>
               <tbody>
-                {jobs.map((job) => (
-                  <tr
-                    key={job.id}
-                    className={job.id === selectedJobId ? "selectedRow" : "clickableRow"}
-                    onClick={() => setSelectedJobId(job.id)}
-                    tabIndex="0"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        setSelectedJobId(job.id);
-                      }
-                    }}
-                  >
-                    <td>{job.title}</td>
-                    <td>{job.company}</td>
-                    <td>{job.location || "Not specified"}</td>
-                    <td><span className="pill">{job.status}</span></td>
-                    <td>{job.source}</td>
-                  </tr>
-                ))}
-                {jobs.length === 0 && !status && (
+                {jobs.map((job) => {
+                  const score = scoresByJob[job.id];
+                  return (
+                    <tr
+                      key={job.id}
+                      className={job.id === selectedJobId ? "selectedRow" : "clickableRow"}
+                      onClick={() => setSelectedJobId(job.id)}
+                      tabIndex="0"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          setSelectedJobId(job.id);
+                        }
+                      }}
+                    >
+                      <td>{job.title}</td>
+                      <td>{job.company}</td>
+                      <td>{job.location || "Not specified"}</td>
+                      <td><span className="pill">{job.status}</span></td>
+                      <td>{job.source}</td>
+                      <td>{formatScore(score)}</td>
+                      <td>{formatRecommendation(score)}</td>
+                    </tr>
+                  );
+                })}
+                {jobs.length === 0 && !isLoading && !errorMessage && (
                   <tr>
-                    <td colSpan="5" className="empty">No jobs found.</td>
+                    <td colSpan="7" className="empty">No jobs found.</td>
                   </tr>
                 )}
               </tbody>
@@ -111,11 +175,24 @@ function App() {
                   <dt>Source</dt>
                   <dd>{selectedJob.source}</dd>
                 </div>
+                <div>
+                  <dt>Score</dt>
+                  <dd>{formatScore(selectedScore)}</dd>
+                </div>
+                <div>
+                  <dt>Recommendation</dt>
+                  <dd>{formatRecommendation(selectedScore)}</dd>
+                </div>
               </dl>
 
               <a className="sourceLink" href={selectedJob.source_url} target="_blank" rel="noreferrer">
                 Open source posting
               </a>
+
+              <section className="scoreDetail">
+                <ScoreList title="Strengths" items={selectedScore?.strengths} />
+                <ScoreList title="Gaps" items={selectedScore?.gaps} />
+              </section>
 
               <h4>Description</h4>
               <p className="description">{selectedJob.description || "No description available."}</p>
