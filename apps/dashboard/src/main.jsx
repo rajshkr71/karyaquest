@@ -48,6 +48,7 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [scoresByJob, setScoresByJob] = useState({});
   const [selectedJobId, setSelectedJobId] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -81,7 +82,27 @@ function App() {
       });
   }, []);
 
-  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
+  const statusOptions = [
+    "All",
+    ...Array.from(new Set(jobs.map((job) => job.status).filter(Boolean))).sort(),
+  ];
+  const visibleJobs = jobs.filter(
+    (job) => statusFilter === "All" || job.status === statusFilter,
+  );
+
+  useEffect(() => {
+    if (
+      visibleJobs.length > 0
+      && !visibleJobs.some((job) => job.id === selectedJobId)
+    ) {
+      setSelectedJobId(visibleJobs[0].id);
+    }
+    if (visibleJobs.length === 0 && selectedJobId) {
+      setSelectedJobId("");
+    }
+  }, [selectedJobId, visibleJobs]);
+
+  const selectedJob = visibleJobs.find((job) => job.id === selectedJobId) ?? null;
   const selectedScore = selectedJob ? scoresByJob[selectedJob.id] : null;
 
   return (
@@ -99,7 +120,22 @@ function App() {
         <section className="card">
           <div className="cardHeader">
             <h2>Jobs</h2>
-            <span>{jobs.length} total</span>
+            <span>{visibleJobs.length} shown / {jobs.length} total</span>
+          </div>
+
+          <div className="filterBar">
+            <label htmlFor="status-filter">Status</label>
+            <select
+              id="status-filter"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              {statusOptions.map((statusOption) => (
+                <option key={statusOption} value={statusOption}>
+                  {statusOption}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="tableWrap">
@@ -116,7 +152,7 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {jobs.map((job) => {
+                {visibleJobs.map((job) => {
                   const score = scoresByJob[job.id];
                   return (
                     <tr
@@ -143,6 +179,11 @@ function App() {
                 {jobs.length === 0 && !isLoading && !errorMessage && (
                   <tr>
                     <td colSpan="7" className="empty">No jobs found.</td>
+                  </tr>
+                )}
+                {jobs.length > 0 && visibleJobs.length === 0 && !isLoading && !errorMessage && (
+                  <tr>
+                    <td colSpan="7" className="empty">No jobs match this status.</td>
                   </tr>
                 )}
               </tbody>

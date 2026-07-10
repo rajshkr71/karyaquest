@@ -61,6 +61,29 @@ h1, h2, h3, h4, p {
   border-bottom: 1px solid #dbe3ef;
 }
 
+.filterBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 24px;
+  border-bottom: 1px solid #edf1f7;
+}
+
+.filterBar label {
+  color: #526173;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.filterBar select {
+  border: 1px solid #cbd6e4;
+  border-radius: 10px;
+  color: #172033;
+  font: inherit;
+  padding: 8px 12px;
+}
+
 .tableWrap {
   overflow-x: auto;
 }
