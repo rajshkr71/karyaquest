@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-migrate-004-resume-generation-requests-v1
+  namespace: karyaquest-data
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: docker.io/library/postgres@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-auth
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-auth
+                  key: POSTGRES_PASSWORD
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-auth
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-auth
+                  key: POSTGRES_DB
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGSSLMODE
+              value: disable
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until pg_isready -h "${PGHOST}" -p "${PGPORT}" -U "${POSTGRES_USER}" >/dev/null 2>&1; do
+                sleep 2
+              done
+
+              psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -f /migrations/004_resume_generation_requests.sql
+      volumes:
+        - name: migrations
+          configMap:
+            name: postgres-migrations

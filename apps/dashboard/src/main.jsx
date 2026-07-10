@@ -34,6 +34,20 @@ function approvalsByJob(approvalRecords) {
   }, {});
 }
 
+function requestsByJob(requestRecords) {
+  return requestRecords.reduce((requests, request) => {
+    const existing = requests[request.job_id];
+    const requestCreatedAt = new Date(request.created_at).getTime();
+    const existingCreatedAt = existing ? new Date(existing.created_at).getTime() : 0;
+
+    if (!existing || requestCreatedAt > existingCreatedAt) {
+      requests[request.job_id] = request;
+    }
+
+    return requests;
+  }, {});
+}
+
 function ScoreList({ title, items }) {
   return (
     <div>
@@ -55,6 +69,7 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [scoresByJob, setScoresByJob] = useState({});
   const [approvals, setApprovals] = useState({});
+  const [requests, setRequests] = useState({});
   const [selectedJobId, setSelectedJobId] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [recommendationFilter, setRecommendationFilter] = useState("All");
@@ -62,6 +77,7 @@ function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [approvingJobId, setApprovingJobId] = useState("");
+  const [requestingJobId, setRequestingJobId] = useState("");
 
   useEffect(() => {
     const fetchJson = (url) =>
@@ -79,16 +95,21 @@ function App() {
       fetchJson("/api/jobs"),
       fetchJson("/api/job-scores"),
       fetchJson("/api/resume-generation-approvals"),
+      fetchJson("/api/resume-generation-requests"),
     ])
-      .then(([jobsData, scoresData, approvalsData]) => {
+      .then(([jobsData, scoresData, approvalsData, requestsData]) => {
         const items = Array.isArray(jobsData) ? jobsData : jobsData.items ?? [];
         const scores = Array.isArray(scoresData) ? scoresData : scoresData.items ?? [];
         const approvalRecords = Array.isArray(approvalsData)
           ? approvalsData
           : approvalsData.items ?? [];
+        const requestRecords = Array.isArray(requestsData)
+          ? requestsData
+          : requestsData.items ?? [];
         setJobs(items);
         setScoresByJob(latestScoresByJob(scores));
         setApprovals(approvalsByJob(approvalRecords));
+        setRequests(requestsByJob(requestRecords));
         setSelectedJobId(items[0]?.id ?? "");
       })
       .catch((error) => {
@@ -96,6 +117,7 @@ function App() {
         setJobs([]);
         setScoresByJob({});
         setApprovals({});
+        setRequests({});
       })
       .finally(() => {
         setIsLoading(false);
@@ -139,11 +161,14 @@ function App() {
   const selectedJob = visibleJobs.find((job) => job.id === selectedJobId) ?? null;
   const selectedScore = selectedJob ? scoresByJob[selectedJob.id] : null;
   const selectedApproval = selectedJob ? approvals[selectedJob.id] : null;
+  const selectedRequest = selectedJob ? requests[selectedJob.id] : null;
   const selectedApprovalState = selectedApproval ? "approved" : "not_requested";
+  const selectedRequestState = selectedRequest?.status ?? "not_requested";
   const canRequestResumeApproval =
     selectedJob
     && selectedScore?.recommendation === "prepare_application"
     && !selectedApproval;
+  const canQueueResumeRequest = selectedJob && selectedApproval && !selectedRequest;
 
   function requestResumeGenerationApproval(jobId) {
     setActionMessage("");
@@ -167,6 +192,31 @@ function App() {
       })
       .finally(() => {
         setApprovingJobId("");
+      });
+  }
+
+  function createResumeGenerationRequest(jobId) {
+    setActionMessage("");
+    setRequestingJobId(jobId);
+    fetch(`/api/jobs/${jobId}/resume-generation-requests`, { method: "POST" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`request creation returned ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((request) => {
+        setRequests((current) => ({
+          ...current,
+          [request.job_id]: request,
+        }));
+        setActionMessage("Resume generation request queued.");
+      })
+      .catch((error) => {
+        setActionMessage(`Unable to queue request: ${error.message}`);
+      })
+      .finally(() => {
+        setRequestingJobId("");
       });
   }
 
@@ -311,6 +361,10 @@ function App() {
                   <dt>Resume approval</dt>
                   <dd>{selectedApprovalState}</dd>
                 </div>
+                <div>
+                  <dt>Resume request</dt>
+                  <dd>{selectedRequestState}</dd>
+                </div>
               </dl>
 
               {canRequestResumeApproval && (
@@ -323,6 +377,19 @@ function App() {
                   {approvingJobId === selectedJob.id
                     ? "Requesting approval..."
                     : "Approve resume generation"}
+                </button>
+              )}
+
+              {canQueueResumeRequest && (
+                <button
+                  className="primaryAction"
+                  type="button"
+                  disabled={requestingJobId === selectedJob.id}
+                  onClick={() => createResumeGenerationRequest(selectedJob.id)}
+                >
+                  {requestingJobId === selectedJob.id
+                    ? "Queueing request..."
+                    : "Queue resume generation"}
                 </button>
               )}
 

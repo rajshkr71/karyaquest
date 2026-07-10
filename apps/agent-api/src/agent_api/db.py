@@ -37,9 +37,21 @@ JOB_SCORE_COLUMNS = """
     created_at
 """
 RESUME_GENERATION_APPROVAL_COLUMNS = "id, job_id, approved_at, created_at"
+RESUME_GENERATION_REQUEST_COLUMNS = """
+    id, job_id, approval_id, resume_id, status, failure_reason,
+    created_at, updated_at
+"""
 
 
 class ResumeGenerationApprovalExists(Exception):
+    pass
+
+
+class ResumeGenerationApprovalMissing(Exception):
+    pass
+
+
+class ActiveResumeGenerationRequestExists(Exception):
     pass
 
 
@@ -392,6 +404,100 @@ def list_resume_generation_approvals(settings: Settings) -> list[dict[str, Any]]
                 """
             )
             return cur.fetchall()
+
+
+def create_resume_generation_request(
+    settings: Settings,
+    job_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM jobs WHERE id = %s", (job_id,))
+            if cur.fetchone() is None:
+                return None
+
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_APPROVAL_COLUMNS}
+                FROM resume_generation_approvals
+                WHERE job_id = %s
+                """,
+                (job_id,),
+            )
+            approval = cur.fetchone()
+            if approval is None:
+                raise ResumeGenerationApprovalMissing
+
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_REQUEST_COLUMNS}
+                FROM resume_generation_requests
+                WHERE job_id = %s
+                  AND status IN ('queued', 'processing')
+                LIMIT 1
+                """,
+                (job_id,),
+            )
+            if cur.fetchone() is not None:
+                raise ActiveResumeGenerationRequestExists
+
+            try:
+                cur.execute(
+                    f"""
+                    INSERT INTO resume_generation_requests (
+                        job_id, approval_id, status
+                    )
+                    VALUES (%s, %s, 'queued')
+                    RETURNING {RESUME_GENERATION_REQUEST_COLUMNS}
+                    """,
+                    (job_id, approval["id"]),
+                )
+            except UniqueViolation as exc:
+                raise ActiveResumeGenerationRequestExists from exc
+            request = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "resume_generation.requested",
+                request["id"],
+                {
+                    "job_id": str(job_id),
+                    "approval_id": str(approval["id"]),
+                    "request_id": str(request["id"]),
+                    "status": request["status"],
+                },
+                target_type="resume_generation_request",
+            )
+            return request
+
+
+def list_resume_generation_requests(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_REQUEST_COLUMNS}
+                FROM resume_generation_requests
+                ORDER BY created_at DESC
+                """
+            )
+            return cur.fetchall()
+
+
+def get_resume_generation_request(
+    settings: Settings,
+    request_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_REQUEST_COLUMNS}
+                FROM resume_generation_requests
+                WHERE id = %s
+                """,
+                (request_id,),
+            )
+            return cur.fetchone()
 
 
 def create_profile(
