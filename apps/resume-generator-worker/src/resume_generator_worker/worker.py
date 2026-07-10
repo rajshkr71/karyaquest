@@ -3,16 +3,36 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import socket
+from json import JSONDecodeError
 from dataclasses import dataclass
 from typing import Any, Protocol
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 LOGGER = logging.getLogger("resume_generator_worker")
+EXIT_SUCCESS = 0
+EXIT_GENERATION_FAILED = 1
+EXIT_LIST_FAILED = 2
+EXIT_CLAIM_FAILED = 3
+EXIT_COMPLETE_FAILED = 4
+UUID_PATTERN = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
 
 
 class ClaimConflict(Exception):
     """Raised when another worker has already claimed the request."""
+
+
+class WorkerRuntimeError(Exception):
+    """Raised for safe, expected one-shot worker failures."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class AgentApiClient(Protocol):
@@ -94,19 +114,50 @@ class HttpAgentApiClient:
         except HTTPError as exc:
             if exc.code == 409 and path.endswith("/claim"):
                 raise ClaimConflict from exc
-            raise
+            raise WorkerRuntimeError(f"agent_api_http_{exc.code}") from exc
+        except TimeoutError as exc:
+            raise WorkerRuntimeError("agent_api_timeout") from exc
+        except socket.timeout as exc:
+            raise WorkerRuntimeError("agent_api_timeout") from exc
+        except URLError as exc:
+            raise WorkerRuntimeError("agent_api_connection_error") from exc
         if not response_body:
             return {}
-        return json.loads(response_body)
+        try:
+            return json.loads(response_body)
+        except JSONDecodeError as exc:
+            raise WorkerRuntimeError("agent_api_invalid_json") from exc
 
 
 def placeholder_generation(request: dict[str, Any]) -> None:
     """Metadata-only placeholder; real generation is intentionally out of scope."""
 
 
+def sanitize_text(value: Any, *, preserve_uuid: bool = False) -> str:
+    text = str(value).strip() or value.__class__.__name__
+    replacements = [
+        "claim_token",
+        "token",
+        "password",
+        "secret",
+        "profile content",
+        "resume content",
+    ]
+    lowered = text.lower()
+    if any(marker in lowered for marker in replacements):
+        return "[redacted]"
+    if not preserve_uuid:
+        text = UUID_PATTERN.sub("[redacted-id]", text)
+    if len(text) > 200:
+        return f"{text[:197]}..."
+    return text
+
+
 def log_event(event: str, **metadata: Any) -> None:
     safe_metadata = {
-        key: value for key, value in metadata.items() if key != "claim_token"
+        key: sanitize_text(value, preserve_uuid=key == "request_id")
+        for key, value in metadata.items()
+        if key != "claim_token"
     }
     LOGGER.info(json.dumps({"event": event, **safe_metadata}, sort_keys=True))
 
@@ -117,14 +168,22 @@ def run_once(
     worker_id: str,
     generator: PlaceholderGenerator = placeholder_generation,
 ) -> int:
-    requests = client.list_requests()
+    try:
+        requests = client.list_requests()
+    except Exception as exc:
+        log_event(
+            "resume_generation.list_failed",
+            error=sanitize_text(exc),
+        )
+        return EXIT_LIST_FAILED
+
     queued = next(
         (request for request in requests if request.get("status") == "queued"),
         None,
     )
     if queued is None:
         log_event("resume_generation.no_queued_request")
-        return 0
+        return EXIT_SUCCESS
 
     request_id = str(queued["id"])
     log_event("resume_generation.claim_attempt", request_id=request_id)
@@ -132,24 +191,48 @@ def run_once(
         claimed = client.claim_request(request_id, worker_id)
     except ClaimConflict:
         log_event("resume_generation.claim_conflict", request_id=request_id)
-        return 0
+        return EXIT_SUCCESS
+    except Exception as exc:
+        log_event(
+            "resume_generation.claim_failed",
+            request_id=request_id,
+            error=sanitize_text(exc),
+        )
+        return EXIT_CLAIM_FAILED
 
     claim_token = claimed["claim_token"]
     try:
         generator(claimed)
     except Exception as exc:
-        failure_reason = str(exc) or exc.__class__.__name__
-        client.fail_request(request_id, claim_token, failure_reason)
+        failure_reason = sanitize_text(exc)
+        try:
+            client.fail_request(request_id, claim_token, failure_reason)
+        except Exception as fail_exc:
+            log_event(
+                "resume_generation.fail_request_failed",
+                request_id=request_id,
+                original_failure_reason=failure_reason,
+                error=sanitize_text(fail_exc),
+            )
+            return EXIT_GENERATION_FAILED
         log_event(
             "resume_generation.failed",
             request_id=request_id,
             failure_reason=failure_reason,
         )
-        return 1
+        return EXIT_GENERATION_FAILED
 
-    client.complete_request(request_id, claim_token)
+    try:
+        client.complete_request(request_id, claim_token)
+    except Exception as exc:
+        log_event(
+            "resume_generation.complete_failed",
+            request_id=request_id,
+            error=sanitize_text(exc),
+        )
+        return EXIT_COMPLETE_FAILED
     log_event("resume_generation.completed", request_id=request_id)
-    return 0
+    return EXIT_SUCCESS
 
 
 def main() -> int:
