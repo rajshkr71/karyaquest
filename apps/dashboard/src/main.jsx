@@ -376,6 +376,16 @@ function App() {
                 </div>
                 {selectedRequest && (
                   <>
+                    {selectedRequest.worker_id && (
+                      <div>
+                        <dt>Worker</dt>
+                        <dd>{selectedRequest.worker_id}</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Attempt count</dt>
+                      <dd>{selectedRequest.attempt_count ?? 0}</dd>
+                    </div>
                     <div>
                       <dt>Processing started</dt>
                       <dd>{formatTimestamp(selectedRequest.processing_started_at)}</dd>

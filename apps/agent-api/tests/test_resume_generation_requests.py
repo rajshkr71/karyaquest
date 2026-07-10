@@ -1,15 +1,18 @@
 from datetime import UTC, datetime
 from uuid import UUID
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from agent_api import db, resume_generation_requests
+from agent_api.main import app
 
 REQUEST_ID = UUID("2ecee968-87dc-43bf-bf6b-10b5c4cfd379")
 APPROVAL_ID = UUID("6f5be64c-b698-4024-b5df-5a6b730e2807")
 JOB_ID = UUID("e56ee8f6-9e6d-4d12-b826-bf69f4d545bf")
+CLAIM_TOKEN = UUID("0059f9f3-428c-4eaf-94ba-dc3589756496")
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
 
@@ -24,6 +27,9 @@ def request_record(**overrides):
         "processing_started_at": None,
         "completed_at": None,
         "failed_at": None,
+        "worker_id": None,
+        "claim_token": None,
+        "attempt_count": 0,
         "created_at": NOW,
         "updated_at": NOW,
     }
@@ -106,6 +112,14 @@ def test_list_resume_generation_requests(monkeypatch) -> None:
     assert resume_generation_requests.list_all(object()) == [request_record()]
 
 
+def test_list_response_model_omits_claim_token() -> None:
+    response = resume_generation_requests.ResumeGenerationRequest.model_validate(
+        request_record(claim_token=CLAIM_TOKEN),
+    ).model_dump()
+
+    assert "claim_token" not in response
+
+
 def test_get_resume_generation_request(monkeypatch) -> None:
     monkeypatch.setattr(
         resume_generation_requests,
@@ -114,6 +128,14 @@ def test_get_resume_generation_request(monkeypatch) -> None:
     )
 
     assert resume_generation_requests.get(REQUEST_ID, object()) == request_record()
+
+
+def test_get_response_model_omits_claim_token() -> None:
+    response = resume_generation_requests.ResumeGenerationRequest.model_validate(
+        request_record(claim_token=CLAIM_TOKEN),
+    ).model_dump()
+
+    assert "claim_token" not in response
 
 
 def test_get_resume_generation_request_missing_returns_404(monkeypatch) -> None:
@@ -133,7 +155,6 @@ def test_get_resume_generation_request_missing_returns_404(monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("endpoint", "new_status"),
     [
-        (resume_generation_requests.start, "processing"),
         (resume_generation_requests.complete, "completed"),
     ],
 )
@@ -141,7 +162,7 @@ def test_valid_non_failure_transitions(endpoint, new_status, monkeypatch) -> Non
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None: request_record(
+        lambda settings, request_id, status, failure_reason=None, worker_id=None: request_record(
             status=status,
         ),
     )
@@ -151,11 +172,90 @@ def test_valid_non_failure_transitions(endpoint, new_status, monkeypatch) -> Non
     assert result["status"] == new_status
 
 
+def test_claim_transition_requires_worker_and_persists_claim_metadata(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        lambda settings, request_id, status, failure_reason=None, worker_id=None: request_record(
+            status=status,
+            worker_id=worker_id,
+            claim_token=CLAIM_TOKEN,
+            attempt_count=1,
+            processing_started_at=NOW,
+        ),
+    )
+
+    result = resume_generation_requests.claim(
+        REQUEST_ID,
+        resume_generation_requests.ResumeGenerationRequestClaim(
+            worker_id=" worker-a ",
+        ),
+        object(),
+    )
+
+    assert result["status"] == "processing"
+    assert result["worker_id"] == "worker-a"
+    assert result["claim_token"] == CLAIM_TOKEN
+    assert result["attempt_count"] == 1
+
+
+def test_claim_response_model_includes_claim_token() -> None:
+    response = resume_generation_requests.ResumeGenerationRequestClaimed.model_validate(
+        request_record(
+            status="processing",
+            worker_id="worker-a",
+            claim_token=CLAIM_TOKEN,
+            attempt_count=1,
+            processing_started_at=NOW,
+        ),
+    ).model_dump()
+
+    assert response["claim_token"] == CLAIM_TOKEN
+
+
+def test_blank_worker_id_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        resume_generation_requests.ResumeGenerationRequestClaim(worker_id="   ")
+
+
+def test_duplicate_claim_returns_409_with_valid_worker_id(monkeypatch) -> None:
+    def already_claimed(settings, request_id, status, failure_reason=None, worker_id=None):
+        assert worker_id == "worker-b"
+        raise db.InvalidResumeGenerationRequestTransition
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        already_claimed,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        resume_generation_requests.claim(
+            REQUEST_ID,
+            resume_generation_requests.ResumeGenerationRequestClaim(
+                worker_id="worker-b",
+            ),
+            object(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "invalid resume generation request transition"
+
+
+def test_start_endpoint_is_not_registered() -> None:
+    paths = {getattr(route, "path", None) for route in app.routes}
+
+    assert "/resume-generation-requests/{request_id}/start" not in paths
+    assert "/resume-generation-requests/{request_id}/claim" in paths
+
+
 def test_valid_failed_transition(monkeypatch) -> None:
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None: request_record(
+        lambda settings, request_id, status, failure_reason=None, worker_id=None: request_record(
             status=status,
             failure_reason=failure_reason,
             failed_at=NOW,
@@ -178,12 +278,11 @@ def test_valid_failed_transition(monkeypatch) -> None:
 @pytest.mark.parametrize(
     "endpoint",
     [
-        resume_generation_requests.start,
         resume_generation_requests.complete,
     ],
 )
 def test_invalid_non_failure_transitions_return_409(endpoint, monkeypatch) -> None:
-    def invalid(settings, request_id, status, failure_reason=None):
+    def invalid(settings, request_id, status, failure_reason=None, worker_id=None):
         raise db.InvalidResumeGenerationRequestTransition
 
     monkeypatch.setattr(
@@ -200,7 +299,7 @@ def test_invalid_non_failure_transitions_return_409(endpoint, monkeypatch) -> No
 
 
 def test_invalid_failure_transition_returns_409(monkeypatch) -> None:
-    def invalid(settings, request_id, status, failure_reason=None):
+    def invalid(settings, request_id, status, failure_reason=None, worker_id=None):
         raise db.InvalidResumeGenerationRequestTransition
 
     monkeypatch.setattr(
@@ -226,11 +325,15 @@ def test_transition_missing_request_returns_404(monkeypatch) -> None:
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None: None,
+        lambda settings, request_id, status, failure_reason=None, worker_id=None: None,
     )
 
     with pytest.raises(HTTPException) as exc:
-        resume_generation_requests.start(REQUEST_ID, object())
+        resume_generation_requests.claim(
+            REQUEST_ID,
+            resume_generation_requests.ResumeGenerationRequestClaim(worker_id="w1"),
+            object(),
+        )
 
     assert exc.value.status_code == 404
     assert exc.value.detail == "resume generation request not found"
@@ -313,7 +416,7 @@ def test_create_resume_generation_request_writes_audit_event(monkeypatch) -> Non
 @pytest.mark.parametrize(
     ("current_status", "new_status", "expected_action"),
     [
-        ("queued", "processing", "resume_generation.processing_started"),
+        ("queued", "processing", "resume_generation.claimed"),
         ("processing", "completed", "resume_generation.completed"),
         ("processing", "failed", "resume_generation.failed"),
     ],
@@ -332,9 +435,13 @@ def test_transition_writes_audit_event(
         completed_at=NOW if new_status == "completed" else None,
         failed_at=NOW if new_status == "failed" else None,
         failure_reason="boom" if new_status == "failed" else None,
+        worker_id="worker-a",
+        claim_token=CLAIM_TOKEN,
+        attempt_count=1,
     )
     cursor = FakeCursor([previous, updated])
     monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(db, "uuid4", lambda: CLAIM_TOKEN)
     monkeypatch.setattr(
         db.psycopg,
         "connect",
@@ -353,6 +460,7 @@ def test_transition_writes_audit_event(
         REQUEST_ID,
         new_status,
         "boom" if new_status == "failed" else None,
+        "worker-a" if new_status == "processing" else None,
     )
 
     assert result == updated
@@ -364,6 +472,9 @@ def test_transition_writes_audit_event(
     }
     if new_status == "failed":
         metadata["failure_reason"] = "boom"
+    if new_status == "processing":
+        metadata["worker_id"] = "worker-a"
+        metadata["attempt_count"] = 1
     assert audit == [
         (
             expected_action,
@@ -372,6 +483,7 @@ def test_transition_writes_audit_event(
             metadata,
         )
     ]
+    assert all("claim_token" not in event_metadata for *_, event_metadata in audit)
 
 
 @pytest.mark.parametrize(
@@ -408,6 +520,50 @@ def test_invalid_db_transitions_are_rejected(
             new_status,
             "boom" if new_status == "failed" else None,
         )
+
+
+def test_duplicate_claim_uses_row_lock_and_rejects_without_update_or_audit(
+    monkeypatch,
+) -> None:
+    audit = []
+    cursor = FakeCursor(
+        [
+            request_record(
+                status="processing",
+                processing_started_at=NOW,
+                worker_id="worker-a",
+                claim_token=CLAIM_TOKEN,
+                attempt_count=1,
+            )
+        ]
+    )
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+    monkeypatch.setattr(
+        db,
+        "_write_audit_log",
+        lambda cur, action, target_id, metadata, target_type="job": audit.append(
+            (action, target_type, target_id, metadata)
+        ),
+    )
+
+    with pytest.raises(db.InvalidResumeGenerationRequestTransition):
+        db.transition_resume_generation_request(
+            object(),
+            REQUEST_ID,
+            "processing",
+            worker_id="worker-b",
+        )
+
+    assert len(cursor.queries) == 1
+    assert "FOR UPDATE" in cursor.queries[0]
+    statements = "\n".join(cursor.queries).lower()
+    assert "update resume_generation_requests" not in statements
+    assert audit == []
 
 
 @pytest.mark.parametrize("finished_status", ["completed", "failed"])

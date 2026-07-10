@@ -30,8 +30,26 @@ class ResumeGenerationRequest(BaseModel):
     processing_started_at: datetime | None = None
     completed_at: datetime | None = None
     failed_at: datetime | None = None
+    worker_id: str | None = None
+    attempt_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+class ResumeGenerationRequestClaimed(ResumeGenerationRequest):
+    claim_token: UUID
+
+
+class ResumeGenerationRequestClaim(BaseModel):
+    worker_id: str = Field(min_length=1)
+
+    @field_validator("worker_id")
+    @classmethod
+    def trim_and_reject_blank(cls, value: str) -> str:
+        worker_id = value.strip()
+        if not worker_id:
+            raise ValueError("worker_id cannot be blank")
+        return worker_id
 
 
 class ResumeGenerationRequestFailure(BaseModel):
@@ -58,6 +76,7 @@ def _transition(
     new_status: str,
     settings: Settings,
     failure_reason: str | None = None,
+    worker_id: str | None = None,
 ) -> ResumeGenerationRequest:
     try:
         request = transition_resume_generation_request(
@@ -65,6 +84,7 @@ def _transition(
             request_id,
             new_status,
             failure_reason,
+            worker_id,
         )
     except InvalidResumeGenerationRequestTransition as exc:
         raise HTTPException(
@@ -132,14 +152,15 @@ def get(
 
 
 @router.post(
-    "/resume-generation-requests/{request_id}/start",
-    response_model=ResumeGenerationRequest,
+    "/resume-generation-requests/{request_id}/claim",
+    response_model=ResumeGenerationRequestClaimed,
 )
-def start(
+def claim(
     request_id: UUID,
+    payload: ResumeGenerationRequestClaim,
     settings: Settings = Depends(get_settings),
-) -> ResumeGenerationRequest:
-    return _transition(request_id, "processing", settings)
+) -> ResumeGenerationRequestClaimed:
+    return _transition(request_id, "processing", settings, worker_id=payload.worker_id)
 
 
 @router.post(
