@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - ../../../base/agent-api
   - ../../../base/dashboard
+  - ../../../base/resume-generator-worker
 
 generators:
   - secret-generator.yaml

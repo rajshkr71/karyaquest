@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: resume-generator-worker
+  namespace: karyaquest-services
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: resume-generator-worker
+          restartPolicy: Never
+          containers:
+            - name: resume-generator-worker
+              image: karyaquest/resume-generator-worker:92618c4486c2
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: AGENT_API_BASE_URL
+                  value: http://agent-api:8000
+                - name: AGENT_API_URL
+                  value: http://agent-api:8000
+
