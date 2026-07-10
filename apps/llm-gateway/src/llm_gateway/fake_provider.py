@@ -11,6 +11,9 @@ class FakeLLMProvider(LLMProvider):
     It performs no network calls and does not invoke an actual language model.
     """
 
+    def __init__(self, *, model_version: str = "fake-v1") -> None:
+        self._model_version = model_version
+
     @property
     def name(self) -> str:
         return "fake"
@@ -20,7 +23,7 @@ class FakeLLMProvider(LLMProvider):
             request_id=request.request_id,
             provider=self.name,
             model=request.model,
-            model_version="fake-v1",
+            model_version=self._model_version,
             output_text="Deterministic fake response",
             input_tokens=0,
             output_tokens=3,
