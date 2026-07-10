@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_api.db import (
@@ -53,6 +53,7 @@ class ResumeGenerationRequestClaim(BaseModel):
 
 
 class ResumeGenerationRequestFailure(BaseModel):
+    claim_token: UUID | None = None
     failure_reason: str = Field(min_length=1)
 
     @field_validator("failure_reason")
@@ -62,6 +63,10 @@ class ResumeGenerationRequestFailure(BaseModel):
         if not reason:
             raise ValueError("failure_reason cannot be blank")
         return reason
+
+
+class ResumeGenerationRequestCompletion(BaseModel):
+    claim_token: UUID | None = None
 
 
 def _not_found() -> HTTPException:
@@ -77,6 +82,7 @@ def _transition(
     settings: Settings,
     failure_reason: str | None = None,
     worker_id: str | None = None,
+    claim_token: UUID | None = None,
 ) -> ResumeGenerationRequest:
     try:
         request = transition_resume_generation_request(
@@ -85,6 +91,7 @@ def _transition(
             new_status,
             failure_reason,
             worker_id,
+            claim_token,
         )
     except InvalidResumeGenerationRequestTransition as exc:
         raise HTTPException(
@@ -169,9 +176,17 @@ def claim(
 )
 def complete(
     request_id: UUID,
+    payload: ResumeGenerationRequestCompletion = Body(
+        default_factory=ResumeGenerationRequestCompletion,
+    ),
     settings: Settings = Depends(get_settings),
 ) -> ResumeGenerationRequest:
-    return _transition(request_id, "completed", settings)
+    return _transition(
+        request_id,
+        "completed",
+        settings,
+        claim_token=payload.claim_token,
+    )
 
 
 @router.post(
@@ -183,4 +198,10 @@ def fail(
     payload: ResumeGenerationRequestFailure,
     settings: Settings = Depends(get_settings),
 ) -> ResumeGenerationRequest:
-    return _transition(request_id, "failed", settings, payload.failure_reason)
+    return _transition(
+        request_id,
+        "failed",
+        settings,
+        payload.failure_reason,
+        claim_token=payload.claim_token,
+    )
