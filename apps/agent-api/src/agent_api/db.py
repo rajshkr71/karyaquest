@@ -3,6 +3,7 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg.conninfo import make_conninfo
@@ -35,6 +36,11 @@ JOB_SCORE_COLUMNS = """
     id, job_id, resume_id, score, strengths, gaps, recommendation, model_used,
     created_at
 """
+RESUME_GENERATION_APPROVAL_COLUMNS = "id, job_id, approved_at, created_at"
+
+
+class ResumeGenerationApprovalExists(Exception):
+    pass
 
 
 def _write_audit_log(
@@ -325,6 +331,67 @@ def update_application(
                     target_type="application",
                 )
             return application
+
+
+def approve_resume_generation(
+    settings: Settings,
+    job_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM jobs WHERE id = %s FOR UPDATE", (job_id,))
+            if cur.fetchone() is None:
+                return None
+
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_APPROVAL_COLUMNS}
+                FROM resume_generation_approvals
+                WHERE job_id = %s
+                LIMIT 1
+                """,
+                (job_id,),
+            )
+            if cur.fetchone() is not None:
+                raise ResumeGenerationApprovalExists
+
+            try:
+                cur.execute(
+                    f"""
+                    INSERT INTO resume_generation_approvals (job_id)
+                    VALUES (%s)
+                    RETURNING {RESUME_GENERATION_APPROVAL_COLUMNS}
+                    """,
+                    (job_id,),
+                )
+            except UniqueViolation as exc:
+                raise ResumeGenerationApprovalExists from exc
+            approval = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "resume_generation.approved",
+                approval["id"],
+                {
+                    "job_id": str(job_id),
+                    "approval_id": str(approval["id"]),
+                    "approval_state": "approved",
+                },
+                target_type="resume_generation_approval",
+            )
+            return approval
+
+
+def list_resume_generation_approvals(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_APPROVAL_COLUMNS}
+                FROM resume_generation_approvals
+                ORDER BY created_at DESC
+                """
+            )
+            return cur.fetchall()
 
 
 def create_profile(

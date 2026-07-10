@@ -209,6 +209,24 @@ dd {
   margin-bottom: 24px;
 }
 
+.primaryAction {
+  display: block;
+  margin-bottom: 16px;
+  border: 0;
+  border-radius: 10px;
+  background: #164f9f;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 14px;
+}
+
+.primaryAction:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .scoreDetail {
   display: grid;
   grid-template-columns: 1fr 1fr;
