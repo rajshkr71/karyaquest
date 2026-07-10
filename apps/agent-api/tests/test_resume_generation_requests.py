@@ -3,6 +3,7 @@ from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from agent_api import db, resume_generation_requests
 
@@ -20,6 +21,9 @@ def request_record(**overrides):
         "resume_id": None,
         "status": "queued",
         "failure_reason": None,
+        "processing_started_at": None,
+        "completed_at": None,
+        "failed_at": None,
         "created_at": NOW,
         "updated_at": NOW,
     }
@@ -126,6 +130,119 @@ def test_get_resume_generation_request_missing_returns_404(monkeypatch) -> None:
     assert exc.value.detail == "resume generation request not found"
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "new_status"),
+    [
+        (resume_generation_requests.start, "processing"),
+        (resume_generation_requests.complete, "completed"),
+    ],
+)
+def test_valid_non_failure_transitions(endpoint, new_status, monkeypatch) -> None:
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        lambda settings, request_id, status, failure_reason=None: request_record(
+            status=status,
+        ),
+    )
+
+    result = endpoint(REQUEST_ID, object())
+
+    assert result["status"] == new_status
+
+
+def test_valid_failed_transition(monkeypatch) -> None:
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        lambda settings, request_id, status, failure_reason=None: request_record(
+            status=status,
+            failure_reason=failure_reason,
+            failed_at=NOW,
+            processing_started_at=NOW,
+        ),
+    )
+
+    result = resume_generation_requests.fail(
+        REQUEST_ID,
+        resume_generation_requests.ResumeGenerationRequestFailure(
+            failure_reason=" upstream failed ",
+        ),
+        object(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_reason"] == "upstream failed"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        resume_generation_requests.start,
+        resume_generation_requests.complete,
+    ],
+)
+def test_invalid_non_failure_transitions_return_409(endpoint, monkeypatch) -> None:
+    def invalid(settings, request_id, status, failure_reason=None):
+        raise db.InvalidResumeGenerationRequestTransition
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        invalid,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        endpoint(REQUEST_ID, object())
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "invalid resume generation request transition"
+
+
+def test_invalid_failure_transition_returns_409(monkeypatch) -> None:
+    def invalid(settings, request_id, status, failure_reason=None):
+        raise db.InvalidResumeGenerationRequestTransition
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        invalid,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        resume_generation_requests.fail(
+            REQUEST_ID,
+            resume_generation_requests.ResumeGenerationRequestFailure(
+                failure_reason="boom",
+            ),
+            object(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "invalid resume generation request transition"
+
+
+def test_transition_missing_request_returns_404(monkeypatch) -> None:
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        lambda settings, request_id, status, failure_reason=None: None,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        resume_generation_requests.start(REQUEST_ID, object())
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "resume generation request not found"
+
+
+def test_blank_failure_reason_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        resume_generation_requests.ResumeGenerationRequestFailure(
+            failure_reason="   ",
+        )
+
+
 class FakeCursor:
     def __init__(self, results):
         self.results = iter(results)
@@ -191,6 +308,151 @@ def test_create_resume_generation_request_writes_audit_event(monkeypatch) -> Non
             },
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("current_status", "new_status", "expected_action"),
+    [
+        ("queued", "processing", "resume_generation.processing_started"),
+        ("processing", "completed", "resume_generation.completed"),
+        ("processing", "failed", "resume_generation.failed"),
+    ],
+)
+def test_transition_writes_audit_event(
+    current_status,
+    new_status,
+    expected_action,
+    monkeypatch,
+) -> None:
+    audit = []
+    previous = request_record(status=current_status)
+    updated = request_record(
+        status=new_status,
+        processing_started_at=NOW,
+        completed_at=NOW if new_status == "completed" else None,
+        failed_at=NOW if new_status == "failed" else None,
+        failure_reason="boom" if new_status == "failed" else None,
+    )
+    cursor = FakeCursor([previous, updated])
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+    monkeypatch.setattr(
+        db,
+        "_write_audit_log",
+        lambda cur, action, target_id, metadata, target_type="job": audit.append(
+            (action, target_type, target_id, metadata)
+        ),
+    )
+
+    result = db.transition_resume_generation_request(
+        object(),
+        REQUEST_ID,
+        new_status,
+        "boom" if new_status == "failed" else None,
+    )
+
+    assert result == updated
+    metadata = {
+        "request_id": str(REQUEST_ID),
+        "job_id": str(JOB_ID),
+        "previous_status": current_status,
+        "new_status": new_status,
+    }
+    if new_status == "failed":
+        metadata["failure_reason"] = "boom"
+    assert audit == [
+        (
+            expected_action,
+            "resume_generation_request",
+            REQUEST_ID,
+            metadata,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("current_status", "new_status"),
+    [
+        ("queued", "completed"),
+        ("queued", "failed"),
+        ("processing", "processing"),
+        ("completed", "processing"),
+        ("completed", "completed"),
+        ("completed", "failed"),
+        ("failed", "processing"),
+        ("failed", "completed"),
+        ("failed", "failed"),
+    ],
+)
+def test_invalid_db_transitions_are_rejected(
+    current_status,
+    new_status,
+    monkeypatch,
+) -> None:
+    cursor = FakeCursor([request_record(status=current_status)])
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+
+    with pytest.raises(db.InvalidResumeGenerationRequestTransition):
+        db.transition_resume_generation_request(
+            object(),
+            REQUEST_ID,
+            new_status,
+            "boom" if new_status == "failed" else None,
+        )
+
+
+@pytest.mark.parametrize("finished_status", ["completed", "failed"])
+def test_new_request_allowed_after_completed_or_failed(
+    finished_status,
+    monkeypatch,
+) -> None:
+    cursor = FakeCursor(
+        [
+            {"id": JOB_ID},
+            {"id": APPROVAL_ID},
+            None,
+            request_record(status="queued"),
+        ]
+    )
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+    monkeypatch.setattr(db, "_write_audit_log", lambda *args, **kwargs: None)
+
+    result = db.create_resume_generation_request(object(), JOB_ID)
+
+    assert result["status"] == "queued"
+
+
+@pytest.mark.parametrize("active_status", ["queued", "processing"])
+def test_new_request_blocked_during_queued_or_processing(
+    active_status,
+    monkeypatch,
+) -> None:
+    cursor = FakeCursor(
+        [{"id": JOB_ID}, {"id": APPROVAL_ID}, request_record(status=active_status)]
+    )
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+
+    with pytest.raises(db.ActiveResumeGenerationRequestExists):
+        db.create_resume_generation_request(object(), JOB_ID)
 
 
 def test_request_queue_does_not_touch_applications_documents_minio_or_llm(
