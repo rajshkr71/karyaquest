@@ -3,15 +3,23 @@ kind: CronJob
 metadata:
   name: resume-generator-worker
   namespace: karyaquest-services
+  labels:
+    app.kubernetes.io/name: resume-generator-worker
 spec:
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
   jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resume-generator-worker
     spec:
       backoffLimit: 0
       template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: resume-generator-worker
         spec:
           serviceAccountName: resume-generator-worker
           restartPolicy: Never
@@ -24,4 +32,3 @@ spec:
                   value: http://agent-api:8000
                 - name: AGENT_API_URL
                   value: http://agent-api:8000
-
