@@ -27,6 +27,13 @@ function formatRecommendation(score) {
   return score?.recommendation?.replaceAll("_", " ") ?? "None yet";
 }
 
+function approvalsByJob(approvalRecords) {
+  return approvalRecords.reduce((approvals, approval) => {
+    approvals[approval.job_id] = approval;
+    return approvals;
+  }, {});
+}
+
 function ScoreList({ title, items }) {
   return (
     <div>
@@ -47,11 +54,14 @@ function ScoreList({ title, items }) {
 function App() {
   const [jobs, setJobs] = useState([]);
   const [scoresByJob, setScoresByJob] = useState({});
+  const [approvals, setApprovals] = useState({});
   const [selectedJobId, setSelectedJobId] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [recommendationFilter, setRecommendationFilter] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
+  const [approvingJobId, setApprovingJobId] = useState("");
 
   useEffect(() => {
     const fetchJson = (url) =>
@@ -65,18 +75,27 @@ function App() {
     setIsLoading(true);
     setErrorMessage("");
 
-    Promise.all([fetchJson("/api/jobs"), fetchJson("/api/job-scores")])
-      .then(([jobsData, scoresData]) => {
+    Promise.all([
+      fetchJson("/api/jobs"),
+      fetchJson("/api/job-scores"),
+      fetchJson("/api/resume-generation-approvals"),
+    ])
+      .then(([jobsData, scoresData, approvalsData]) => {
         const items = Array.isArray(jobsData) ? jobsData : jobsData.items ?? [];
         const scores = Array.isArray(scoresData) ? scoresData : scoresData.items ?? [];
+        const approvalRecords = Array.isArray(approvalsData)
+          ? approvalsData
+          : approvalsData.items ?? [];
         setJobs(items);
         setScoresByJob(latestScoresByJob(scores));
+        setApprovals(approvalsByJob(approvalRecords));
         setSelectedJobId(items[0]?.id ?? "");
       })
       .catch((error) => {
         setErrorMessage(`Unable to load dashboard data: ${error.message}`);
         setJobs([]);
         setScoresByJob({});
+        setApprovals({});
       })
       .finally(() => {
         setIsLoading(false);
@@ -119,6 +138,37 @@ function App() {
 
   const selectedJob = visibleJobs.find((job) => job.id === selectedJobId) ?? null;
   const selectedScore = selectedJob ? scoresByJob[selectedJob.id] : null;
+  const selectedApproval = selectedJob ? approvals[selectedJob.id] : null;
+  const selectedApprovalState = selectedApproval ? "approved" : "not_requested";
+  const canRequestResumeApproval =
+    selectedJob
+    && selectedScore?.recommendation === "prepare_application"
+    && !selectedApproval;
+
+  function requestResumeGenerationApproval(jobId) {
+    setActionMessage("");
+    setApprovingJobId(jobId);
+    fetch(`/api/jobs/${jobId}/resume-generation-approval`, { method: "POST" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`approval request returned ${response.status}`);
+        }
+        return response.json();
+      })
+      .then((approval) => {
+        setApprovals((current) => ({
+          ...current,
+          [approval.job_id]: approval,
+        }));
+        setActionMessage("Resume generation approval recorded.");
+      })
+      .catch((error) => {
+        setActionMessage(`Unable to request approval: ${error.message}`);
+      })
+      .finally(() => {
+        setApprovingJobId("");
+      });
+  }
 
   return (
     <main className="page">
@@ -130,6 +180,7 @@ function App() {
 
       {isLoading && <div className="status">Loading jobs and scores...</div>}
       {errorMessage && <div className="status error">{errorMessage}</div>}
+      {actionMessage && <div className="status">{actionMessage}</div>}
 
       <div className="layout">
         <section className="card">
@@ -256,7 +307,24 @@ function App() {
                   <dt>Recommendation</dt>
                   <dd>{formatRecommendation(selectedScore)}</dd>
                 </div>
+                <div>
+                  <dt>Resume approval</dt>
+                  <dd>{selectedApprovalState}</dd>
+                </div>
               </dl>
+
+              {canRequestResumeApproval && (
+                <button
+                  className="primaryAction"
+                  type="button"
+                  disabled={approvingJobId === selectedJob.id}
+                  onClick={() => requestResumeGenerationApproval(selectedJob.id)}
+                >
+                  {approvingJobId === selectedJob.id
+                    ? "Requesting approval..."
+                    : "Approve resume generation"}
+                </button>
+              )}
 
               <a className="sourceLink" href={selectedJob.source_url} target="_blank" rel="noreferrer">
                 Open source posting
