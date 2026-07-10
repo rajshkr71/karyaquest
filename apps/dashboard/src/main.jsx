@@ -49,6 +49,7 @@ function App() {
   const [scoresByJob, setScoresByJob] = useState({});
   const [selectedJobId, setSelectedJobId] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
+  const [recommendationFilter, setRecommendationFilter] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -86,8 +87,22 @@ function App() {
     "All",
     ...Array.from(new Set(jobs.map((job) => job.status).filter(Boolean))).sort(),
   ];
+  const recommendationOptions = [
+    "All",
+    "prepare_application",
+    "reject",
+    "None yet",
+  ];
   const visibleJobs = jobs.filter(
-    (job) => statusFilter === "All" || job.status === statusFilter,
+    (job) => {
+      const score = scoresByJob[job.id];
+      const recommendation = score?.recommendation ?? "None yet";
+      const statusMatches = statusFilter === "All" || job.status === statusFilter;
+      const recommendationMatches =
+        recommendationFilter === "All" || recommendation === recommendationFilter;
+
+      return statusMatches && recommendationMatches;
+    },
   );
 
   useEffect(() => {
@@ -124,18 +139,35 @@ function App() {
           </div>
 
           <div className="filterBar">
-            <label htmlFor="status-filter">Status</label>
-            <select
-              id="status-filter"
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
-            >
-              {statusOptions.map((statusOption) => (
-                <option key={statusOption} value={statusOption}>
-                  {statusOption}
-                </option>
-              ))}
-            </select>
+            <div className="filterControl">
+              <label htmlFor="status-filter">Status</label>
+              <select
+                id="status-filter"
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value)}
+              >
+                {statusOptions.map((statusOption) => (
+                  <option key={statusOption} value={statusOption}>
+                    {statusOption}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="filterControl">
+              <label htmlFor="recommendation-filter">Recommendation</label>
+              <select
+                id="recommendation-filter"
+                value={recommendationFilter}
+                onChange={(event) => setRecommendationFilter(event.target.value)}
+              >
+                {recommendationOptions.map((recommendationOption) => (
+                  <option key={recommendationOption} value={recommendationOption}>
+                    {recommendationOption}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="tableWrap">
@@ -183,7 +215,7 @@ function App() {
                 )}
                 {jobs.length > 0 && visibleJobs.length === 0 && !isLoading && !errorMessage && (
                   <tr>
-                    <td colSpan="7" className="empty">No jobs match this status.</td>
+                    <td colSpan="7" className="empty">No jobs match these filters.</td>
                   </tr>
                 )}
               </tbody>

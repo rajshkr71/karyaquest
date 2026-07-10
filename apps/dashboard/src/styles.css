@@ -64,9 +64,16 @@ h1, h2, h3, h4, p {
 .filterBar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 16px;
   padding: 16px 24px;
   border-bottom: 1px solid #edf1f7;
+}
+
+.filterControl {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .filterBar label {
