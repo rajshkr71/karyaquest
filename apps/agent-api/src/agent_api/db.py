@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 from uuid import UUID
+from uuid import uuid4
 
 import psycopg
 from psycopg.errors import UniqueViolation
@@ -39,7 +40,8 @@ JOB_SCORE_COLUMNS = """
 RESUME_GENERATION_APPROVAL_COLUMNS = "id, job_id, approved_at, created_at"
 RESUME_GENERATION_REQUEST_COLUMNS = """
     id, job_id, approval_id, resume_id, status, failure_reason,
-    processing_started_at, completed_at, failed_at, created_at, updated_at
+    processing_started_at, completed_at, failed_at, worker_id, claim_token,
+    attempt_count, created_at, updated_at
 """
 
 
@@ -509,13 +511,16 @@ def transition_resume_generation_request(
     request_id: UUID,
     new_status: str,
     failure_reason: str | None = None,
+    worker_id: str | None = None,
 ) -> dict[str, Any] | None:
     transitions = {
-        "processing": ("queued", "resume_generation.processing_started"),
+        "processing": ("queued", "resume_generation.claimed"),
         "completed": ("processing", "resume_generation.completed"),
         "failed": ("processing", "resume_generation.failed"),
     }
     previous_status, action = transitions[new_status]
+    if new_status == "processing" and not (worker_id or "").strip():
+        raise InvalidResumeGenerationRequestTransition
 
     with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -535,12 +540,17 @@ def transition_resume_generation_request(
                 raise InvalidResumeGenerationRequestTransition
 
             if new_status == "processing":
+                claim_token = uuid4()
+                worker_id = worker_id.strip()
                 assignments = """
                     status = 'processing',
                     processing_started_at = now(),
+                    worker_id = %s,
+                    claim_token = %s,
+                    attempt_count = attempt_count + 1,
                     updated_at = now()
                 """
-                parameters = (request_id,)
+                parameters = (worker_id, claim_token, request_id)
             elif new_status == "completed":
                 assignments = """
                     status = 'completed',
@@ -573,6 +583,9 @@ def transition_resume_generation_request(
                 "previous_status": existing["status"],
                 "new_status": request["status"],
             }
+            if request["status"] == "processing":
+                metadata["worker_id"] = request["worker_id"]
+                metadata["attempt_count"] = request["attempt_count"]
             if request["status"] == "failed":
                 metadata["failure_reason"] = request["failure_reason"]
             _write_audit_log(
