@@ -89,20 +89,54 @@ h1, h2, h3, h4, p {
 }
 
 table {
+  min-width: 1040px;
   width: 100%;
   border-collapse: collapse;
 }
 
 th, td {
-  padding: 14px 16px;
+  padding: 16px 20px;
   text-align: left;
   border-bottom: 1px solid #edf1f7;
+  vertical-align: middle;
 }
 
 th {
   color: #526173;
   font-size: 0.84rem;
   text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.jobsTable th:nth-child(1),
+.jobsTable td:nth-child(1) {
+  min-width: 260px;
+}
+
+.jobsTable th:nth-child(2),
+.jobsTable td:nth-child(2) {
+  min-width: 180px;
+}
+
+.jobsTable th:nth-child(3),
+.jobsTable td:nth-child(3) {
+  min-width: 180px;
+}
+
+.jobsTable th:nth-child(4),
+.jobsTable td:nth-child(4),
+.jobsTable th:nth-child(6),
+.jobsTable td:nth-child(6),
+.jobsTable th:nth-child(7),
+.jobsTable td:nth-child(7) {
+  white-space: nowrap;
+}
+
+.jobsTable td:nth-child(1),
+.jobsTable td:nth-child(2),
+.jobsTable td:nth-child(3) {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .clickableRow,
