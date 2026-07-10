@@ -139,7 +139,7 @@ function App() {
           </div>
 
           <div className="tableWrap">
-            <table>
+            <table className="jobsTable">
               <thead>
                 <tr>
                   <th>Title</th>
