@@ -48,6 +48,13 @@ function requestsByJob(requestRecords) {
   }, {});
 }
 
+function formatTimestamp(value) {
+  if (!value) {
+    return "Not recorded";
+  }
+  return new Date(value).toLocaleString();
+}
+
 function ScoreList({ title, items }) {
   return (
     <div>
@@ -164,11 +171,13 @@ function App() {
   const selectedRequest = selectedJob ? requests[selectedJob.id] : null;
   const selectedApprovalState = selectedApproval ? "approved" : "not_requested";
   const selectedRequestState = selectedRequest?.status ?? "not_requested";
+  const hasActiveRequest =
+    selectedRequest && ["queued", "processing"].includes(selectedRequest.status);
   const canRequestResumeApproval =
     selectedJob
     && selectedScore?.recommendation === "prepare_application"
     && !selectedApproval;
-  const canQueueResumeRequest = selectedJob && selectedApproval && !selectedRequest;
+  const canQueueResumeRequest = selectedJob && selectedApproval && !hasActiveRequest;
 
   function requestResumeGenerationApproval(jobId) {
     setActionMessage("");
@@ -365,6 +374,28 @@ function App() {
                   <dt>Resume request</dt>
                   <dd>{selectedRequestState}</dd>
                 </div>
+                {selectedRequest && (
+                  <>
+                    <div>
+                      <dt>Processing started</dt>
+                      <dd>{formatTimestamp(selectedRequest.processing_started_at)}</dd>
+                    </div>
+                    <div>
+                      <dt>Completed</dt>
+                      <dd>{formatTimestamp(selectedRequest.completed_at)}</dd>
+                    </div>
+                    <div>
+                      <dt>Failed</dt>
+                      <dd>{formatTimestamp(selectedRequest.failed_at)}</dd>
+                    </div>
+                    {selectedRequest.failure_reason && (
+                      <div>
+                        <dt>Failure reason</dt>
+                        <dd>{selectedRequest.failure_reason}</dd>
+                      </div>
+                    )}
+                  </>
+                )}
               </dl>
 
               {canRequestResumeApproval && (

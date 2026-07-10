@@ -7,6 +7,7 @@ resources:
   - postgres-migrate-002-profiles-resumes.yaml
   - postgres-migrate-003-resume-generation-approvals.yaml
   - postgres-migrate-004-resume-generation-requests.yaml
+  - postgres-migrate-005-resume-generation-request-lifecycle.yaml
 
 configMapGenerator:
   - name: postgres-migrations
@@ -15,6 +16,7 @@ configMapGenerator:
       - migrations/002_profiles_resumes.sql
       - migrations/003_resume_generation_approvals.sql
       - migrations/004_resume_generation_requests.sql
+      - migrations/005_resume_generation_request_lifecycle.sql
 
 generatorOptions:
   disableNameSuffixHash: true

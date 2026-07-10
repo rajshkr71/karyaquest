@@ -39,7 +39,7 @@ JOB_SCORE_COLUMNS = """
 RESUME_GENERATION_APPROVAL_COLUMNS = "id, job_id, approved_at, created_at"
 RESUME_GENERATION_REQUEST_COLUMNS = """
     id, job_id, approval_id, resume_id, status, failure_reason,
-    created_at, updated_at
+    processing_started_at, completed_at, failed_at, created_at, updated_at
 """
 
 
@@ -52,6 +52,10 @@ class ResumeGenerationApprovalMissing(Exception):
 
 
 class ActiveResumeGenerationRequestExists(Exception):
+    pass
+
+
+class InvalidResumeGenerationRequestTransition(Exception):
     pass
 
 
@@ -445,9 +449,9 @@ def create_resume_generation_request(
                 cur.execute(
                     f"""
                     INSERT INTO resume_generation_requests (
-                        job_id, approval_id, status
+                        job_id, approval_id, status, created_at, updated_at
                     )
-                    VALUES (%s, %s, 'queued')
+                    VALUES (%s, %s, 'queued', now(), now())
                     RETURNING {RESUME_GENERATION_REQUEST_COLUMNS}
                     """,
                     (job_id, approval["id"]),
@@ -498,6 +502,87 @@ def get_resume_generation_request(
                 (request_id,),
             )
             return cur.fetchone()
+
+
+def transition_resume_generation_request(
+    settings: Settings,
+    request_id: UUID,
+    new_status: str,
+    failure_reason: str | None = None,
+) -> dict[str, Any] | None:
+    transitions = {
+        "processing": ("queued", "resume_generation.processing_started"),
+        "completed": ("processing", "resume_generation.completed"),
+        "failed": ("processing", "resume_generation.failed"),
+    }
+    previous_status, action = transitions[new_status]
+
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_REQUEST_COLUMNS}
+                FROM resume_generation_requests
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (request_id,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                return None
+            if existing["status"] != previous_status:
+                raise InvalidResumeGenerationRequestTransition
+
+            if new_status == "processing":
+                assignments = """
+                    status = 'processing',
+                    processing_started_at = now(),
+                    updated_at = now()
+                """
+                parameters = (request_id,)
+            elif new_status == "completed":
+                assignments = """
+                    status = 'completed',
+                    completed_at = now(),
+                    updated_at = now()
+                """
+                parameters = (request_id,)
+            else:
+                assignments = """
+                    status = 'failed',
+                    failed_at = now(),
+                    failure_reason = %s,
+                    updated_at = now()
+                """
+                parameters = (failure_reason, request_id)
+
+            cur.execute(
+                f"""
+                UPDATE resume_generation_requests
+                SET {assignments}
+                WHERE id = %s
+                RETURNING {RESUME_GENERATION_REQUEST_COLUMNS}
+                """,
+                parameters,
+            )
+            request = cur.fetchone()
+            metadata = {
+                "request_id": str(request["id"]),
+                "job_id": str(request["job_id"]),
+                "previous_status": existing["status"],
+                "new_status": request["status"],
+            }
+            if request["status"] == "failed":
+                metadata["failure_reason"] = request["failure_reason"]
+            _write_audit_log(
+                cur,
+                action,
+                request["id"],
+                metadata,
+                target_type="resume_generation_request",
+            )
+            return request
 
 
 def create_profile(
