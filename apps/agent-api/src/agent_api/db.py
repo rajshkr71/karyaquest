@@ -512,6 +512,7 @@ def transition_resume_generation_request(
     new_status: str,
     failure_reason: str | None = None,
     worker_id: str | None = None,
+    claim_token: UUID | None = None,
 ) -> dict[str, Any] | None:
     transitions = {
         "processing": ("queued", "resume_generation.claimed"),
@@ -538,9 +539,13 @@ def transition_resume_generation_request(
                 return None
             if existing["status"] != previous_status:
                 raise InvalidResumeGenerationRequestTransition
+            if new_status in {"completed", "failed"} and (
+                claim_token is None or claim_token != existing["claim_token"]
+            ):
+                raise InvalidResumeGenerationRequestTransition
 
             if new_status == "processing":
-                claim_token = uuid4()
+                generated_claim_token = uuid4()
                 worker_id = worker_id.strip()
                 assignments = """
                     status = 'processing',
@@ -550,7 +555,7 @@ def transition_resume_generation_request(
                     attempt_count = attempt_count + 1,
                     updated_at = now()
                 """
-                parameters = (worker_id, claim_token, request_id)
+                parameters = (worker_id, generated_claim_token, request_id)
             elif new_status == "completed":
                 assignments = """
                     status = 'completed',

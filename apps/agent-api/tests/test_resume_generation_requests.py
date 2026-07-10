@@ -162,12 +162,18 @@ def test_valid_non_failure_transitions(endpoint, new_status, monkeypatch) -> Non
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None, worker_id=None: request_record(
+        lambda settings, request_id, status, failure_reason=None, worker_id=None, claim_token=None: request_record(
             status=status,
         ),
     )
 
-    result = endpoint(REQUEST_ID, object())
+    result = endpoint(
+        REQUEST_ID,
+        resume_generation_requests.ResumeGenerationRequestCompletion(
+            claim_token=CLAIM_TOKEN,
+        ),
+        object(),
+    )
 
     assert result["status"] == new_status
 
@@ -178,7 +184,7 @@ def test_claim_transition_requires_worker_and_persists_claim_metadata(
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None, worker_id=None: request_record(
+        lambda settings, request_id, status, failure_reason=None, worker_id=None, claim_token=None: request_record(
             status=status,
             worker_id=worker_id,
             claim_token=CLAIM_TOKEN,
@@ -221,7 +227,14 @@ def test_blank_worker_id_is_rejected() -> None:
 
 
 def test_duplicate_claim_returns_409_with_valid_worker_id(monkeypatch) -> None:
-    def already_claimed(settings, request_id, status, failure_reason=None, worker_id=None):
+    def already_claimed(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
         assert worker_id == "worker-b"
         raise db.InvalidResumeGenerationRequestTransition
 
@@ -255,7 +268,7 @@ def test_valid_failed_transition(monkeypatch) -> None:
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None, worker_id=None: request_record(
+        lambda settings, request_id, status, failure_reason=None, worker_id=None, claim_token=None: request_record(
             status=status,
             failure_reason=failure_reason,
             failed_at=NOW,
@@ -266,6 +279,7 @@ def test_valid_failed_transition(monkeypatch) -> None:
     result = resume_generation_requests.fail(
         REQUEST_ID,
         resume_generation_requests.ResumeGenerationRequestFailure(
+            claim_token=CLAIM_TOKEN,
             failure_reason=" upstream failed ",
         ),
         object(),
@@ -282,7 +296,14 @@ def test_valid_failed_transition(monkeypatch) -> None:
     ],
 )
 def test_invalid_non_failure_transitions_return_409(endpoint, monkeypatch) -> None:
-    def invalid(settings, request_id, status, failure_reason=None, worker_id=None):
+    def invalid(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
         raise db.InvalidResumeGenerationRequestTransition
 
     monkeypatch.setattr(
@@ -292,14 +313,27 @@ def test_invalid_non_failure_transitions_return_409(endpoint, monkeypatch) -> No
     )
 
     with pytest.raises(HTTPException) as exc:
-        endpoint(REQUEST_ID, object())
+        endpoint(
+            REQUEST_ID,
+            resume_generation_requests.ResumeGenerationRequestCompletion(
+                claim_token=CLAIM_TOKEN,
+            ),
+            object(),
+        )
 
     assert exc.value.status_code == 409
     assert exc.value.detail == "invalid resume generation request transition"
 
 
 def test_invalid_failure_transition_returns_409(monkeypatch) -> None:
-    def invalid(settings, request_id, status, failure_reason=None, worker_id=None):
+    def invalid(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
         raise db.InvalidResumeGenerationRequestTransition
 
     monkeypatch.setattr(
@@ -312,7 +346,148 @@ def test_invalid_failure_transition_returns_409(monkeypatch) -> None:
         resume_generation_requests.fail(
             REQUEST_ID,
             resume_generation_requests.ResumeGenerationRequestFailure(
+                claim_token=CLAIM_TOKEN,
                 failure_reason="boom",
+            ),
+            object(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "invalid resume generation request transition"
+
+
+def test_complete_requires_correct_claim_token(monkeypatch) -> None:
+    def transition(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
+        assert claim_token == CLAIM_TOKEN
+        return request_record(
+            status=status,
+            processing_started_at=NOW,
+            completed_at=NOW,
+            worker_id="worker-a",
+            attempt_count=1,
+        )
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        transition,
+    )
+
+    result = resume_generation_requests.complete(
+        REQUEST_ID,
+        resume_generation_requests.ResumeGenerationRequestCompletion(
+            claim_token=CLAIM_TOKEN,
+        ),
+        object(),
+    )
+
+    assert result["status"] == "completed"
+
+
+def test_incorrect_complete_claim_token_returns_409(monkeypatch) -> None:
+    wrong_token = uuid4()
+
+    def invalid(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
+        assert claim_token == wrong_token
+        raise db.InvalidResumeGenerationRequestTransition
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        invalid,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        resume_generation_requests.complete(
+            REQUEST_ID,
+            resume_generation_requests.ResumeGenerationRequestCompletion(
+                claim_token=wrong_token,
+            ),
+            object(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "invalid resume generation request transition"
+
+
+def test_fail_requires_correct_claim_token(monkeypatch) -> None:
+    def transition(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
+        assert claim_token == CLAIM_TOKEN
+        return request_record(
+            status=status,
+            failure_reason=failure_reason,
+            processing_started_at=NOW,
+            failed_at=NOW,
+            worker_id="worker-a",
+            attempt_count=1,
+        )
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        transition,
+    )
+
+    result = resume_generation_requests.fail(
+        REQUEST_ID,
+        resume_generation_requests.ResumeGenerationRequestFailure(
+            claim_token=CLAIM_TOKEN,
+            failure_reason="worker failed",
+        ),
+        object(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_reason"] == "worker failed"
+
+
+def test_incorrect_fail_claim_token_returns_409(monkeypatch) -> None:
+    wrong_token = uuid4()
+
+    def invalid(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
+        assert claim_token == wrong_token
+        raise db.InvalidResumeGenerationRequestTransition
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        invalid,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        resume_generation_requests.fail(
+            REQUEST_ID,
+            resume_generation_requests.ResumeGenerationRequestFailure(
+                claim_token=wrong_token,
+                failure_reason="worker failed",
             ),
             object(),
         )
@@ -325,7 +500,7 @@ def test_transition_missing_request_returns_404(monkeypatch) -> None:
     monkeypatch.setattr(
         resume_generation_requests,
         "transition_resume_generation_request",
-        lambda settings, request_id, status, failure_reason=None, worker_id=None: None,
+        lambda settings, request_id, status, failure_reason=None, worker_id=None, claim_token=None: None,
     )
 
     with pytest.raises(HTTPException) as exc:
@@ -337,6 +512,86 @@ def test_transition_missing_request_returns_404(monkeypatch) -> None:
 
     assert exc.value.status_code == 404
     assert exc.value.detail == "resume generation request not found"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        (
+            resume_generation_requests.complete,
+            resume_generation_requests.ResumeGenerationRequestCompletion(
+                claim_token=CLAIM_TOKEN,
+            ),
+        ),
+        (
+            resume_generation_requests.fail,
+            resume_generation_requests.ResumeGenerationRequestFailure(
+                claim_token=CLAIM_TOKEN,
+                failure_reason="boom",
+            ),
+        ),
+    ],
+)
+def test_finish_transition_missing_request_returns_404(
+    endpoint,
+    payload,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        lambda settings, request_id, status, failure_reason=None, worker_id=None, claim_token=None: None,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        endpoint(REQUEST_ID, payload, object())
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "resume generation request not found"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        (
+            resume_generation_requests.complete,
+            resume_generation_requests.ResumeGenerationRequestCompletion(),
+        ),
+        (
+            resume_generation_requests.fail,
+            resume_generation_requests.ResumeGenerationRequestFailure(
+                failure_reason="boom",
+            ),
+        ),
+    ],
+)
+def test_missing_finish_claim_token_returns_409(
+    endpoint,
+    payload,
+    monkeypatch,
+) -> None:
+    def invalid(
+        settings,
+        request_id,
+        status,
+        failure_reason=None,
+        worker_id=None,
+        claim_token=None,
+    ):
+        assert claim_token is None
+        raise db.InvalidResumeGenerationRequestTransition
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "transition_resume_generation_request",
+        invalid,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        endpoint(REQUEST_ID, payload, object())
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "invalid resume generation request transition"
 
 
 def test_blank_failure_reason_is_rejected() -> None:
@@ -428,7 +683,13 @@ def test_transition_writes_audit_event(
     monkeypatch,
 ) -> None:
     audit = []
-    previous = request_record(status=current_status)
+    previous = request_record(
+        status=current_status,
+        processing_started_at=NOW if current_status == "processing" else None,
+        worker_id="worker-a" if current_status == "processing" else None,
+        claim_token=CLAIM_TOKEN if current_status == "processing" else None,
+        attempt_count=1 if current_status == "processing" else 0,
+    )
     updated = request_record(
         status=new_status,
         processing_started_at=NOW,
@@ -461,6 +722,7 @@ def test_transition_writes_audit_event(
         new_status,
         "boom" if new_status == "failed" else None,
         "worker-a" if new_status == "processing" else None,
+        CLAIM_TOKEN if new_status in {"completed", "failed"} else None,
     )
 
     assert result == updated
@@ -557,6 +819,60 @@ def test_duplicate_claim_uses_row_lock_and_rejects_without_update_or_audit(
             REQUEST_ID,
             "processing",
             worker_id="worker-b",
+        )
+
+    assert len(cursor.queries) == 1
+    assert "FOR UPDATE" in cursor.queries[0]
+    statements = "\n".join(cursor.queries).lower()
+    assert "update resume_generation_requests" not in statements
+    assert audit == []
+
+
+@pytest.mark.parametrize(
+    ("new_status", "failure_reason"),
+    [
+        ("completed", None),
+        ("failed", "worker failed"),
+    ],
+)
+def test_finish_token_mismatch_rejects_without_update_or_audit(
+    new_status,
+    failure_reason,
+    monkeypatch,
+) -> None:
+    audit = []
+    cursor = FakeCursor(
+        [
+            request_record(
+                status="processing",
+                processing_started_at=NOW,
+                worker_id="worker-a",
+                claim_token=CLAIM_TOKEN,
+                attempt_count=1,
+            )
+        ]
+    )
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+    monkeypatch.setattr(
+        db,
+        "_write_audit_log",
+        lambda cur, action, target_id, metadata, target_type="job": audit.append(
+            (action, target_type, target_id, metadata)
+        ),
+    )
+
+    with pytest.raises(db.InvalidResumeGenerationRequestTransition):
+        db.transition_resume_generation_request(
+            object(),
+            REQUEST_ID,
+            new_status,
+            failure_reason,
+            claim_token=uuid4(),
         )
 
     assert len(cursor.queries) == 1
