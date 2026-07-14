@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
 from uuid import uuid4
@@ -35,7 +36,10 @@ def clear_dependency_overrides() -> None:
 
 @pytest.fixture(autouse=True)
 def capture_audit_logs(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.INFO, logger="llm_gateway.audit")
+    audit_logging.configure_audit_logger()
+    audit_logging.logger.addHandler(caplog.handler)
+    yield
+    audit_logging.logger.removeHandler(caplog.handler)
 
 
 def valid_request(*, provider: str = "fake") -> dict[str, object]:
@@ -71,6 +75,97 @@ def audit_entries(
             )
             entries.append(parsed_entry)
     return entries
+
+
+def dedicated_audit_handlers() -> list[logging.StreamHandler]:
+    handlers = [
+        handler
+        for handler in audit_logging.logger.handlers
+        if getattr(handler, audit_logging.AUDIT_HANDLER_MARKER, False)
+    ]
+    assert all(isinstance(handler, logging.StreamHandler) for handler in handlers)
+    return handlers
+
+
+def test_audit_logger_enables_info_without_caplog_level_change() -> None:
+    assert audit_logging.logger.level == logging.INFO
+    assert audit_logging.logger.isEnabledFor(logging.INFO)
+
+
+def test_audit_logger_has_exactly_one_dedicated_stream_handler() -> None:
+    handlers = dedicated_audit_handlers()
+
+    assert len(handlers) == 1
+
+
+def test_audit_logger_configuration_is_idempotent() -> None:
+    handler = dedicated_audit_handlers()[0]
+
+    audit_logging.configure_audit_logger()
+    audit_logging.configure_audit_logger()
+
+    assert dedicated_audit_handlers() == [handler]
+
+
+def test_audit_logger_configuration_removes_extra_marked_handlers() -> None:
+    original_handlers = list(audit_logging.logger.handlers)
+    for handler in original_handlers:
+        audit_logging.logger.removeHandler(handler)
+
+    retained_handler = logging.StreamHandler(io.StringIO())
+    extra_handler = logging.StreamHandler(io.StringIO())
+    unrelated_handler = logging.StreamHandler(io.StringIO())
+    setattr(retained_handler, audit_logging.AUDIT_HANDLER_MARKER, True)
+    setattr(extra_handler, audit_logging.AUDIT_HANDLER_MARKER, True)
+    audit_logging.logger.addHandler(unrelated_handler)
+    audit_logging.logger.addHandler(retained_handler)
+    audit_logging.logger.addHandler(extra_handler)
+
+    try:
+        audit_logging.configure_audit_logger()
+
+        assert dedicated_audit_handlers() == [retained_handler]
+        assert unrelated_handler in audit_logging.logger.handlers
+    finally:
+        for handler in list(audit_logging.logger.handlers):
+            audit_logging.logger.removeHandler(handler)
+        for handler in original_handlers:
+            audit_logging.logger.addHandler(handler)
+        audit_logging.configure_audit_logger()
+
+
+def test_audit_logger_propagation_is_disabled() -> None:
+    assert audit_logging.logger.propagate is False
+
+
+def test_audit_logger_emits_valid_compact_json_to_dedicated_handler() -> None:
+    handler = dedicated_audit_handlers()[0]
+    stream = io.StringIO()
+    old_stream = handler.setStream(stream)
+
+    try:
+        log_audit_event(
+            "llm.generate.started",
+            request_id="request-123",
+            outcome="started",
+        )
+    finally:
+        handler.setStream(old_stream)
+
+    output = stream.getvalue()
+    line = output.removesuffix("\n")
+    parsed_entry = json.loads(line)
+
+    assert output == (
+        json.dumps(parsed_entry, separators=(",", ":"), sort_keys=False) + "\n"
+    )
+    assert parsed_entry == {
+        "schema_version": 1,
+        "service": "llm-gateway",
+        "event": "llm.generate.started",
+        "outcome": "started",
+        "request_id": "request-123",
+    }
 
 
 def test_audit_log_line_is_valid_compact_json_with_common_fields(

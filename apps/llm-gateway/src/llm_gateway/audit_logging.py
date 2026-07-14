@@ -9,8 +9,36 @@ from llm_gateway.redaction import safe_log_metadata
 AUDIT_LOGGER_NAME = "llm_gateway.audit"
 AUDIT_SCHEMA_VERSION = 1
 AUDIT_SERVICE = "llm-gateway"
+AUDIT_HANDLER_MARKER = "_llm_gateway_audit_handler"
 
-logger = logging.getLogger(AUDIT_LOGGER_NAME)
+
+def _audit_handler() -> logging.StreamHandler:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    setattr(handler, AUDIT_HANDLER_MARKER, True)
+    return handler
+
+
+def configure_audit_logger() -> logging.Logger:
+    audit_logger = logging.getLogger(AUDIT_LOGGER_NAME)
+    audit_logger.setLevel(logging.INFO)
+    audit_logger.propagate = False
+
+    dedicated_handlers = [
+        handler
+        for handler in audit_logger.handlers
+        if getattr(handler, AUDIT_HANDLER_MARKER, False)
+    ]
+    if not dedicated_handlers:
+        audit_logger.addHandler(_audit_handler())
+    else:
+        for handler in dedicated_handlers[1:]:
+            audit_logger.removeHandler(handler)
+
+    return audit_logger
+
+
+logger = configure_audit_logger()
 
 
 def log_audit_event(
