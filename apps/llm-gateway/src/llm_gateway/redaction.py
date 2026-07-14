@@ -32,12 +32,29 @@ UUID_PATTERN = re.compile(
 )
 
 UNSAFE_LOG_FIELDS = {
+    "metadata",
     "prompt",
     "prompt_template",
     "variables",
     "output",
     "output_text",
     "response_text",
+}
+
+SENSITIVE_LOG_FIELDS = {
+    "api_key",
+    "apikey",
+    "access_token",
+    "authorization",
+    "bearer_token",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "secret_key",
+    "token",
 }
 
 
@@ -86,7 +103,9 @@ def safe_log_metadata(
             safe[key] = str(value)
             continue
 
-        if isinstance(value, str):
+        if key.lower() in SENSITIVE_LOG_FIELDS:
+            safe[key] = REDACTED
+        elif isinstance(value, str):
             safe[key] = redact_text(
                 value,
                 preserve_request_id=request_id,
