@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     max_output_tokens: int = Field(default=1024, ge=1, le=32768)
     request_timeout_seconds: int = Field(default=30, ge=1, le=300)
     max_retries: int = Field(default=2, ge=0, le=10)
+    openai_api_key: SecretStr | None = None
     log_level: str = "INFO"
 
     @field_validator(

@@ -14,6 +14,7 @@ def test_settings_use_safe_defaults() -> None:
     assert settings.max_output_tokens == 1024
     assert settings.request_timeout_seconds == 30
     assert settings.max_retries == 2
+    assert settings.openai_api_key is None
     assert settings.log_level == "INFO"
 
 
@@ -25,6 +26,7 @@ def test_settings_read_environment_variables(monkeypatch) -> None:
     monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "2048")
     monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
     monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    monkeypatch.setenv("LLM_OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("LLM_LOG_LEVEL", "debug")
 
     settings = Settings()
@@ -36,7 +38,16 @@ def test_settings_read_environment_variables(monkeypatch) -> None:
     assert settings.max_output_tokens == 2048
     assert settings.request_timeout_seconds == 45
     assert settings.max_retries == 3
+    assert settings.openai_api_key is not None
+    assert settings.openai_api_key.get_secret_value() == "test-openai-key"
     assert settings.log_level == "DEBUG"
+
+
+def test_settings_repr_does_not_expose_openai_api_key() -> None:
+    settings = Settings(openai_api_key="test-openai-key")
+
+    assert "test-openai-key" not in repr(settings)
+    assert "**********" in repr(settings)
 
 
 @pytest.mark.parametrize(
