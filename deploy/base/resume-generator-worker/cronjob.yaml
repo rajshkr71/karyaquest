@@ -25,7 +25,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: resume-generator-worker
-              image: karyaquest/resume-generator-worker:3200eb71063a
+              image: karyaquest/resume-generator-worker@sha256:df669ad1d74ff6f73d25d168bebd015a87895ce6938ef944e7e4c919a185c80a
               imagePullPolicy: IfNotPresent
               env:
                 - name: AGENT_API_URL
