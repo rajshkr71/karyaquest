@@ -1,8 +1,12 @@
 from uuid import uuid4
+from unittest.mock import Mock, patch
 
+import httpx
+import openai
 from fastapi.testclient import TestClient
 
-from llm_gateway.main import app
+from llm_gateway.main import app, get_provider
+from llm_gateway.provider import LLMProvider
 from llm_gateway.settings import Settings, get_settings
 
 client = TestClient(app)
@@ -97,6 +101,58 @@ def test_generate_returns_503_for_unsupported_configured_provider() -> None:
     assert response.json() == {
         "detail": "configured provider is unavailable"
     }
+
+
+def test_generate_maps_openai_rate_limit_error_to_safe_429() -> None:
+    error = openai.RateLimitError(
+        "rate limited: sk-secret project=proj-secret prompt=private",
+        response=httpx.Response(
+            429,
+            headers={"x-sensitive": "quota-secret"},
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        ),
+        body={"error": {"type": "rate_limit_exceeded", "output": "private"}},
+    )
+
+    _assert_safe_rate_limit_response(error)
+
+
+def test_generate_maps_insufficient_quota_to_safe_429() -> None:
+    error = openai.RateLimitError(
+        "insufficient_quota for project proj-secret",
+        response=httpx.Response(
+            429,
+            headers={"x-sensitive": "quota-secret"},
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        ),
+        body={"error": {"type": "insufficient_quota", "api_key": "sk-secret"}},
+    )
+
+    _assert_safe_rate_limit_response(error)
+
+
+def _assert_safe_rate_limit_response(error: openai.RateLimitError) -> None:
+    provider = Mock(spec=LLMProvider)
+    provider.name = "fake"
+    provider.generate.side_effect = error
+    app.dependency_overrides[get_provider] = lambda: provider
+
+    try:
+        with patch("llm_gateway.main.log_audit_event") as log_audit_event:
+            response = client.post("/generate", json=valid_request())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "detail": "upstream provider rate limit exceeded"
+    }
+    failed_call = next(
+        call
+        for call in log_audit_event.call_args_list
+        if call.args == ("llm.generate.failed",)
+    )
+    assert failed_call.kwargs["error_type"] == "RateLimitError"
 
 
 def test_generate_rejects_blank_model() -> None:
