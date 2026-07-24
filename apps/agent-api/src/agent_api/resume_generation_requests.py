@@ -1,15 +1,18 @@
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_api.db import (
     ActiveResumeGenerationRequestExists,
     InvalidResumeGenerationRequestTransition,
+    ResumeGenerationArtifactConflict,
     ResumeGenerationApprovalMissing,
     SourceResumeNotFound,
+    complete_resume_generation_request,
     create_resume_generation_request,
+    get_resume_generation_artifact,
     get_resume_generation_request,
     list_resume_generation_requests,
     transition_resume_generation_request,
@@ -17,6 +20,10 @@ from agent_api.db import (
 from agent_api.settings import Settings, get_settings
 
 router = APIRouter(tags=["resume-generation-requests"])
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class ResumeGenerationRequest(BaseModel):
@@ -70,8 +77,51 @@ class ResumeGenerationRequestFailure(BaseModel):
         return reason
 
 
-class ResumeGenerationRequestCompletion(BaseModel):
-    claim_token: UUID | None = None
+class ResumeGenerationArtifactCreate(StrictModel):
+    storage_bucket: str = Field(min_length=1)
+    storage_key: str = Field(min_length=1)
+    content_type: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    latency_ms: int = Field(ge=0)
+    finish_reason: str = Field(min_length=1)
+
+    @field_validator(
+        "storage_bucket",
+        "storage_key",
+        "content_type",
+        "provider",
+        "model",
+        "model_version",
+        "finish_reason",
+    )
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class ResumeGenerationArtifact(ResumeGenerationArtifactCreate):
+    id: UUID
+    request_id: UUID
+    job_id: UUID
+    source_resume_id: UUID
+    created_at: datetime
+
+
+class ResumeGenerationRequestCompletion(StrictModel):
+    claim_token: UUID
+    artifact: ResumeGenerationArtifactCreate
+
+
+class ResumeGenerationRequestCompleted(ResumeGenerationRequest):
+    artifact: ResumeGenerationArtifact
 
 
 def _not_found() -> HTTPException:
@@ -183,21 +233,50 @@ def claim(
 
 @router.post(
     "/resume-generation-requests/{request_id}/complete",
-    response_model=ResumeGenerationRequest,
+    response_model=ResumeGenerationRequestCompleted,
 )
 def complete(
     request_id: UUID,
-    payload: ResumeGenerationRequestCompletion = Body(
-        default_factory=ResumeGenerationRequestCompletion,
-    ),
+    payload: ResumeGenerationRequestCompletion,
     settings: Settings = Depends(get_settings),
-) -> ResumeGenerationRequest:
-    return _transition(
-        request_id,
-        "completed",
-        settings,
-        claim_token=payload.claim_token,
-    )
+) -> ResumeGenerationRequestCompleted:
+    try:
+        request = complete_resume_generation_request(
+            settings,
+            request_id,
+            payload.claim_token,
+            payload.artifact.model_dump(),
+        )
+    except InvalidResumeGenerationRequestTransition as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="invalid resume generation request transition",
+        ) from exc
+    except ResumeGenerationArtifactConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="resume generation artifact already exists",
+        ) from exc
+    if request is None:
+        raise _not_found()
+    return request
+
+
+@router.get(
+    "/resume-generation-requests/{request_id}/artifact",
+    response_model=ResumeGenerationArtifact,
+)
+def get_artifact(
+    request_id: UUID,
+    settings: Settings = Depends(get_settings),
+) -> ResumeGenerationArtifact:
+    artifact = get_resume_generation_artifact(settings, request_id)
+    if artifact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="resume generation artifact not found",
+        )
+    return artifact
 
 
 @router.post(

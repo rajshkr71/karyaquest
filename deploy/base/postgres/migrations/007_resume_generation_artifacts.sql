@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS resume_generation_artifacts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id UUID NOT NULL UNIQUE REFERENCES resume_generation_requests(id),
+  job_id UUID NOT NULL REFERENCES jobs(id),
+  source_resume_id UUID NOT NULL REFERENCES resumes(id),
+  storage_bucket TEXT NOT NULL,
+  storage_key TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  sha256 TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
+  output_tokens INTEGER NOT NULL CHECK (output_tokens >= 0),
+  latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+  finish_reason TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (storage_bucket, storage_key)
+);

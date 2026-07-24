@@ -43,6 +43,11 @@ RESUME_GENERATION_REQUEST_COLUMNS = """
     processing_started_at, completed_at, failed_at, worker_id, claim_token,
     attempt_count, created_at, updated_at
 """
+RESUME_GENERATION_ARTIFACT_COLUMNS = """
+    id, request_id, job_id, source_resume_id, storage_bucket, storage_key,
+    content_type, sha256, size_bytes, provider, model, model_version,
+    input_tokens, output_tokens, latency_ms, finish_reason, created_at
+"""
 
 
 class ResumeGenerationApprovalExists(Exception):
@@ -62,6 +67,10 @@ class ActiveResumeGenerationRequestExists(Exception):
 
 
 class InvalidResumeGenerationRequestTransition(Exception):
+    pass
+
+
+class ResumeGenerationArtifactConflict(Exception):
     pass
 
 
@@ -514,6 +523,121 @@ def get_resume_generation_request(
                 (request_id,),
             )
             return cur.fetchone()
+
+
+def get_resume_generation_artifact(
+    settings: Settings,
+    request_id: UUID,
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_ARTIFACT_COLUMNS}
+                FROM resume_generation_artifacts
+                WHERE request_id = %s
+                """,
+                (request_id,),
+            )
+            return cur.fetchone()
+
+
+def complete_resume_generation_request(
+    settings: Settings,
+    request_id: UUID,
+    claim_token: UUID,
+    artifact_values: dict[str, Any],
+) -> dict[str, Any] | None:
+    with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT {RESUME_GENERATION_REQUEST_COLUMNS}
+                FROM resume_generation_requests
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (request_id,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                return None
+            if (
+                existing["status"] != "processing"
+                or claim_token != existing["claim_token"]
+                or existing["resume_id"] is None
+            ):
+                raise InvalidResumeGenerationRequestTransition
+
+            try:
+                cur.execute(
+                    f"""
+                    INSERT INTO resume_generation_artifacts (
+                        request_id, job_id, source_resume_id, storage_bucket,
+                        storage_key, content_type, sha256, size_bytes, provider,
+                        model, model_version, input_tokens, output_tokens,
+                        latency_ms, finish_reason
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s
+                    )
+                    RETURNING {RESUME_GENERATION_ARTIFACT_COLUMNS}
+                    """,
+                    (
+                        request_id,
+                        existing["job_id"],
+                        existing["resume_id"],
+                        artifact_values["storage_bucket"],
+                        artifact_values["storage_key"],
+                        artifact_values["content_type"],
+                        artifact_values["sha256"],
+                        artifact_values["size_bytes"],
+                        artifact_values["provider"],
+                        artifact_values["model"],
+                        artifact_values["model_version"],
+                        artifact_values["input_tokens"],
+                        artifact_values["output_tokens"],
+                        artifact_values["latency_ms"],
+                        artifact_values["finish_reason"],
+                    ),
+                )
+            except UniqueViolation as exc:
+                raise ResumeGenerationArtifactConflict from exc
+            artifact = cur.fetchone()
+
+            cur.execute(
+                f"""
+                UPDATE resume_generation_requests
+                SET status = 'completed', completed_at = now(), updated_at = now()
+                WHERE id = %s
+                RETURNING {RESUME_GENERATION_REQUEST_COLUMNS}
+                """,
+                (request_id,),
+            )
+            request = cur.fetchone()
+            _write_audit_log(
+                cur,
+                "resume_generation.completed",
+                request_id,
+                {
+                    "request_id": str(request_id),
+                    "artifact_id": str(artifact["id"]),
+                    "storage_bucket": artifact["storage_bucket"],
+                    "storage_key": artifact["storage_key"],
+                    "sha256": artifact["sha256"],
+                    "size_bytes": artifact["size_bytes"],
+                    "provider": artifact["provider"],
+                    "model": artifact["model"],
+                    "model_version": artifact["model_version"],
+                    "input_tokens": artifact["input_tokens"],
+                    "output_tokens": artifact["output_tokens"],
+                    "latency_ms": artifact["latency_ms"],
+                    "finish_reason": artifact["finish_reason"],
+                },
+                target_type="resume_generation_request",
+            )
+            return request | {"artifact": artifact}
 
 
 def transition_resume_generation_request(
