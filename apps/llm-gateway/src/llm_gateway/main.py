@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
+try:
+    from openai import RateLimitError
+except ImportError:
+    RateLimitError = None  # type: ignore[assignment]
+
 from llm_gateway.audit_logging import log_audit_event
 from llm_gateway.models import LLMRequest, LLMResponse
 from llm_gateway.provider import LLMProvider
@@ -86,6 +91,11 @@ def generate(
             error_type=type(exc).__name__,
             outcome="failed",
         )
+        if RateLimitError is not None and isinstance(exc, RateLimitError):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="upstream provider rate limit exceeded",
+            ) from None
         raise
 
     log_audit_event(
