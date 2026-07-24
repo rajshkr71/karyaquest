@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import socket
 import sys
@@ -23,6 +24,8 @@ from resume_generator_worker.worker import (
     EXIT_SUCCESS,
     GenerationInput,
     HttpAgentApiClient,
+    HttpLlmGatewayClient,
+    ResumeGenerationResult,
     WorkerRuntimeError,
     run_once,
 )
@@ -50,6 +53,59 @@ def resume_record():
         "id": RESUME_ID,
         "content": "Experienced platform engineer",
     }
+
+
+def valid_generation_output(**overrides):
+    output = {
+        "tailored_resume_content": "Truthful tailored resume",
+        "change_summary": ["Reordered skills"],
+        "source_facts_used": ["Python experience"],
+        "unsupported_claims": [],
+    }
+    return output | overrides
+
+
+def gateway_envelope(output_text=None, **overrides):
+    envelope = {
+        "request_id": REQUEST_ID,
+        "provider": "provider",
+        "model": "model",
+        "model_version": "model-v1",
+        "output_text": output_text or json.dumps(valid_generation_output()),
+        "input_tokens": 100,
+        "output_tokens": 200,
+        "latency_ms": 300,
+        "finish_reason": "stop",
+        "redactions_applied": [],
+    }
+    return envelope | overrides
+
+
+class FakeLlmClient:
+    def __init__(self, result=None, error=None):
+        self.result = result or ResumeGenerationResult(**valid_generation_output())
+        self.error = error
+        self.requests = []
+
+    def generate(self, request):
+        self.requests.append(request)
+        if self.error:
+            raise self.error
+        return self.result
+
+
+class HttpResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def read(self):
+        return self.body
 
 
 class FakeClient:
@@ -124,6 +180,20 @@ class FakeClient:
 
 def queued_request():
     return {"id": REQUEST_ID, "status": "queued"}
+
+
+def generation_request():
+    return GenerationInput(
+        request_id=REQUEST_ID,
+        job_id=JOB_ID,
+        resume_id=RESUME_ID,
+        job_title="Platform Engineer",
+        company="Example Corp",
+        job_description="Build reliable systems",
+        required_skills=["Python", "PostgreSQL"],
+        preferred_skills=["Kubernetes"],
+        source_resume_content="Experienced platform engineer",
+    )
 
 
 def test_no_queued_request_exits_successfully(caplog):
@@ -523,4 +593,263 @@ def test_claim_token_never_appears_in_logs(caplog):
     with caplog.at_level(logging.INFO, logger="resume_generator_worker"):
         run_once(client, worker_id="worker-a")
 
+    assert CLAIM_TOKEN not in caplog.text
+
+
+def test_http_llm_client_returns_valid_structured_result(monkeypatch):
+    captured = []
+    response_body = json.dumps(
+        gateway_envelope(
+            provider="configured-provider",
+            model="configured-model",
+        )
+    ).encode()
+
+    def respond(request, timeout):
+        captured.append((request, timeout))
+        return HttpResponse(response_body)
+
+    monkeypatch.setattr(worker, "urlopen", respond)
+    client = HttpLlmGatewayClient(
+        "http://internal-gateway",
+        provider="configured-provider",
+        model="configured-model",
+        temperature=0.3,
+        max_output_tokens=2048,
+        timeout_seconds=12,
+    )
+
+    result = client.generate(generation_request())
+
+    assert result == ResumeGenerationResult(**valid_generation_output())
+    request, timeout = captured[0]
+    assert request.full_url == "http://internal-gateway/generate"
+    assert timeout == 12
+    payload = json.loads(request.data)
+    assert payload == {
+        "request_id": REQUEST_ID,
+        "task_type": "resume_generation",
+        "prompt_template": worker.TRUTHFUL_RESUME_INSTRUCTIONS,
+        "variables": {
+            "request_id": REQUEST_ID,
+            "job_id": JOB_ID,
+            "resume_id": RESUME_ID,
+            "job_title": "Platform Engineer",
+            "company": "Example Corp",
+            "job_description": "Build reliable systems",
+            "required_skills": ["Python", "PostgreSQL"],
+            "preferred_skills": ["Kubernetes"],
+            "source_resume_content": "Experienced platform engineer",
+        },
+        "provider": "configured-provider",
+        "model": "configured-model",
+        "temperature": 0.3,
+        "max_output_tokens": 2048,
+        "metadata": {"job_id": JOB_ID, "resume_id": RESUME_ID},
+    }
+    instructions = payload["prompt_template"].lower()
+    for required_instruction in (
+        "use only facts present in the source resume",
+        "do not invent employers",
+        "do not invent projects",
+        "do not invent certifications",
+        "do not invent education",
+        "do not inflate years of experience",
+        "preserve truthful dates and technologies",
+        "report unsupported claims",
+    ):
+        assert required_instruction in instructions
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        [],
+        valid_generation_output(extra="not allowed"),
+        valid_generation_output(change_summary=[1]),
+        valid_generation_output(tailored_resume_content="   "),
+    ],
+)
+def test_http_llm_client_rejects_malformed_response(output, monkeypatch):
+    body = json.dumps(gateway_envelope(json.dumps(output))).encode()
+    monkeypatch.setattr(worker, "urlopen", lambda *args, **kwargs: HttpResponse(body))
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == "llm_gateway_malformed_response"
+
+
+def test_http_llm_client_rejects_invalid_outer_json(monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "urlopen",
+        lambda *args, **kwargs: HttpResponse(b"not-json"),
+    )
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == "llm_gateway_invalid_json"
+
+
+@pytest.mark.parametrize(
+    "output_text",
+    [
+        "not-json",
+        "```json\n{}\n```",
+        '{"tailored_resume_content": "valid"} surrounding prose',
+    ],
+    ids=["invalid-json", "markdown-fence", "surrounding-prose"],
+)
+def test_http_llm_client_rejects_non_object_output_text(
+    output_text,
+    monkeypatch,
+):
+    body = json.dumps(gateway_envelope(output_text)).encode()
+    monkeypatch.setattr(worker, "urlopen", lambda *args, **kwargs: HttpResponse(body))
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == "llm_gateway_malformed_response"
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {key: value for key, value in gateway_envelope().items() if key != "latency_ms"},
+        gateway_envelope(extra="not allowed"),
+        gateway_envelope(input_tokens=-1),
+        gateway_envelope(redactions_applied=[1]),
+    ],
+    ids=["missing-field", "extra-field", "negative-token", "bad-redactions"],
+)
+def test_http_llm_client_rejects_malformed_outer_envelope(envelope, monkeypatch):
+    body = json.dumps(envelope).encode()
+    monkeypatch.setattr(worker, "urlopen", lambda *args, **kwargs: HttpResponse(body))
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == "llm_gateway_malformed_response"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"request_id": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"},
+        {"provider": "other-provider"},
+        {"model": "other-model"},
+    ],
+    ids=["request-id", "provider", "model"],
+)
+def test_http_llm_client_rejects_envelope_identity_mismatch(
+    overrides,
+    monkeypatch,
+):
+    body = json.dumps(gateway_envelope(**overrides)).encode()
+    monkeypatch.setattr(worker, "urlopen", lambda *args, **kwargs: HttpResponse(body))
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == "llm_gateway_malformed_response"
+
+
+def test_http_llm_client_fails_closed_on_unsupported_claims(monkeypatch):
+    output = valid_generation_output(unsupported_claims=["Invented certification"])
+    body = json.dumps(gateway_envelope(json.dumps(output))).encode()
+    monkeypatch.setattr(worker, "urlopen", lambda *args, **kwargs: HttpResponse(body))
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == "resume_generation_unsupported_claims"
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_reason"),
+    [
+        (TimeoutError("private timeout details"), "llm_gateway_timeout"),
+        (URLError("private connection details"), "llm_gateway_connection_error"),
+    ],
+)
+def test_http_llm_client_sanitizes_transport_failures(
+    raised,
+    expected_reason,
+    monkeypatch,
+):
+    def fail(*args, **kwargs):
+        raise raised
+
+    monkeypatch.setattr(worker, "urlopen", fail)
+    client = HttpLlmGatewayClient("http://gateway", "provider", "model")
+
+    with pytest.raises(WorkerRuntimeError) as exc:
+        client.generate(generation_request())
+
+    assert exc.value.reason == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("result", "error", "reason"),
+    [
+        (None, WorkerRuntimeError("llm_gateway_malformed_response"), "llm_gateway_malformed_response"),
+        (
+            ResumeGenerationResult(
+                **valid_generation_output(unsupported_claims=["Invented employer"])
+            ),
+            None,
+            "resume_generation_unsupported_claims",
+        ),
+    ],
+)
+def test_invalid_generation_never_completes(result, error, reason):
+    client = FakeClient([queued_request()])
+    llm_client = FakeLlmClient(result=result, error=error)
+
+    exit_code = run_once(client, worker_id="worker-a", llm_client=llm_client)
+
+    assert exit_code == EXIT_GENERATION_FAILED
+    assert client.completed == []
+    assert client.failed == [(REQUEST_ID, CLAIM_TOKEN, reason)]
+
+
+def test_valid_generation_result_reaches_completion():
+    client = FakeClient([queued_request()])
+    llm_client = FakeLlmClient()
+
+    exit_code = run_once(client, worker_id="worker-a", llm_client=llm_client)
+
+    assert exit_code == EXIT_SUCCESS
+    assert llm_client.requests == [generation_request()]
+    assert client.completed == [(REQUEST_ID, CLAIM_TOKEN)]
+    assert client.failed == []
+
+
+def test_gateway_sensitive_content_is_absent_from_logs(caplog):
+    sensitive = "PRIVATE_RESUME_AND_GENERATED_CONTENT"
+    client = FakeClient(
+        [queued_request()],
+        job={**job_record(), "description": sensitive},
+        resume={**resume_record(), "content": sensitive},
+    )
+    llm_client = FakeLlmClient(error=RuntimeError(sensitive))
+
+    with caplog.at_level(logging.INFO, logger="resume_generator_worker"):
+        exit_code = run_once(
+            client,
+            worker_id="worker-a",
+            llm_client=llm_client,
+        )
+
+    assert exit_code == EXIT_GENERATION_FAILED
+    assert sensitive not in caplog.text
     assert CLAIM_TOKEN not in caplog.text
