@@ -9,6 +9,7 @@ resources:
   - postgres-migrate-004-resume-generation-requests.yaml
   - postgres-migrate-005-resume-generation-request-lifecycle.yaml
   - postgres-migrate-006-resume-generation-worker-claim-v1.yaml
+  - postgres-migrate-007-resume-generation-artifacts-v1.yaml
 
 configMapGenerator:
   - name: postgres-migrations
@@ -19,6 +20,7 @@ configMapGenerator:
       - migrations/004_resume_generation_requests.sql
       - migrations/005_resume_generation_request_lifecycle.sql
       - migrations/006_resume_generation_worker_claim.sql
+      - migrations/007_resume_generation_artifacts.sql
 
 generatorOptions:
   disableNameSuffixHash: true
