@@ -21,6 +21,17 @@ UUID_PATTERN = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
+SAFE_ERROR_REASONS = {
+    "agent_api_connection_error",
+    "agent_api_invalid_json",
+    "agent_api_timeout",
+    "job_not_found",
+    "malformed_claim_response",
+    "malformed_job_response",
+    "malformed_resume_response",
+    "source_resume_id_missing",
+    "source_resume_not_found",
+}
 
 
 class ClaimConflict(Exception):
@@ -40,6 +51,10 @@ class AgentApiClient(Protocol):
 
     def claim_request(self, request_id: str, worker_id: str) -> dict[str, Any]: ...
 
+    def get_job(self, job_id: str) -> dict[str, Any]: ...
+
+    def get_resume(self, resume_id: str) -> dict[str, Any]: ...
+
     def complete_request(self, request_id: str, claim_token: str) -> dict[str, Any]: ...
 
     def fail_request(
@@ -51,7 +66,20 @@ class AgentApiClient(Protocol):
 
 
 class PlaceholderGenerator(Protocol):
-    def __call__(self, request: dict[str, Any]) -> None: ...
+    def __call__(self, generation_input: GenerationInput) -> None: ...
+
+
+@dataclass(frozen=True)
+class GenerationInput:
+    request_id: str
+    job_id: str
+    resume_id: str
+    job_title: str
+    company: str
+    job_description: str
+    required_skills: list[Any]
+    preferred_skills: list[Any]
+    source_resume_content: str
 
 
 @dataclass
@@ -71,6 +99,22 @@ class HttpAgentApiClient:
             f"/resume-generation-requests/{request_id}/claim",
             {"worker_id": worker_id},
         )
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        try:
+            return self._request("GET", f"/jobs/{job_id}")
+        except WorkerRuntimeError as exc:
+            if exc.reason == "agent_api_http_404":
+                raise WorkerRuntimeError("job_not_found") from exc
+            raise
+
+    def get_resume(self, resume_id: str) -> dict[str, Any]:
+        try:
+            return self._request("GET", f"/resumes/{resume_id}")
+        except WorkerRuntimeError as exc:
+            if exc.reason == "agent_api_http_404":
+                raise WorkerRuntimeError("source_resume_not_found") from exc
+            raise
 
     def complete_request(self, request_id: str, claim_token: str) -> dict[str, Any]:
         return self._request(
@@ -129,8 +173,84 @@ class HttpAgentApiClient:
             raise WorkerRuntimeError("agent_api_invalid_json") from exc
 
 
-def placeholder_generation(request: dict[str, Any]) -> None:
+def placeholder_generation(generation_input: GenerationInput) -> None:
     """Metadata-only placeholder; real generation is intentionally out of scope."""
+
+
+def _required_string(record: dict[str, Any], field: str, record_type: str) -> str:
+    value = record.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise WorkerRuntimeError(f"malformed_{record_type}_response")
+    return value
+
+
+def _required_list(record: dict[str, Any], field: str, record_type: str) -> list[Any]:
+    value = record.get(field)
+    if not isinstance(value, list):
+        raise WorkerRuntimeError(f"malformed_{record_type}_response")
+    return value
+
+
+def load_generation_input(
+    client: AgentApiClient,
+    claimed: dict[str, Any],
+) -> GenerationInput:
+    request_id = _required_string(claimed, "id", "claim")
+    job_id = _required_string(claimed, "job_id", "claim")
+    resume_id = claimed.get("resume_id")
+    if not isinstance(resume_id, str) or not resume_id.strip():
+        raise WorkerRuntimeError("source_resume_id_missing")
+
+    job = client.get_job(job_id)
+    if not isinstance(job, dict):
+        raise WorkerRuntimeError("malformed_job_response")
+    resume = client.get_resume(resume_id)
+    if not isinstance(resume, dict):
+        raise WorkerRuntimeError("malformed_resume_response")
+    if _required_string(job, "id", "job") != job_id:
+        raise WorkerRuntimeError("malformed_job_response")
+    if _required_string(resume, "id", "resume") != resume_id:
+        raise WorkerRuntimeError("malformed_resume_response")
+
+    return GenerationInput(
+        request_id=request_id,
+        job_id=job_id,
+        resume_id=resume_id,
+        job_title=_required_string(job, "title", "job"),
+        company=_required_string(job, "company", "job"),
+        job_description=_required_string(job, "description", "job"),
+        required_skills=_required_list(job, "required_skills", "job"),
+        preferred_skills=_required_list(job, "preferred_skills", "job"),
+        source_resume_content=_required_string(resume, "content", "resume"),
+    )
+
+
+def safe_error_reason(exc: Exception) -> str:
+    if isinstance(exc, WorkerRuntimeError) and (
+        exc.reason in SAFE_ERROR_REASONS
+        or re.fullmatch(r"agent_api_http_\d{3}", exc.reason)
+    ):
+        return exc.reason
+    return "generation_failed"
+
+
+def validate_claim_response(
+    claimed: Any,
+    request_id: str,
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(claimed, dict):
+        raise WorkerRuntimeError("malformed_claim_response")
+    claimed_id = claimed.get("id")
+    claim_token = claimed.get("claim_token")
+    if (
+        not isinstance(claimed_id, str)
+        or not claimed_id.strip()
+        or claimed_id != request_id
+        or not isinstance(claim_token, str)
+        or not claim_token.strip()
+    ):
+        raise WorkerRuntimeError("malformed_claim_response")
+    return claimed, claim_token
 
 
 def sanitize_text(value: Any, *, preserve_uuid: bool = False) -> str:
@@ -173,7 +293,7 @@ def run_once(
     except Exception as exc:
         log_event(
             "resume_generation.list_failed",
-            error=sanitize_text(exc),
+            error=safe_error_reason(exc),
         )
         return EXIT_LIST_FAILED
 
@@ -188,7 +308,10 @@ def run_once(
     request_id = str(queued["id"])
     log_event("resume_generation.claim_attempt", request_id=request_id)
     try:
-        claimed = client.claim_request(request_id, worker_id)
+        claimed, claim_token = validate_claim_response(
+            client.claim_request(request_id, worker_id),
+            request_id,
+        )
     except ClaimConflict:
         log_event("resume_generation.claim_conflict", request_id=request_id)
         return EXIT_SUCCESS
@@ -196,15 +319,15 @@ def run_once(
         log_event(
             "resume_generation.claim_failed",
             request_id=request_id,
-            error=sanitize_text(exc),
+            error=safe_error_reason(exc),
         )
         return EXIT_CLAIM_FAILED
 
-    claim_token = claimed["claim_token"]
     try:
-        generator(claimed)
+        generation_input = load_generation_input(client, claimed)
+        generator(generation_input)
     except Exception as exc:
-        failure_reason = sanitize_text(exc)
+        failure_reason = safe_error_reason(exc)
         try:
             client.fail_request(request_id, claim_token, failure_reason)
         except Exception as fail_exc:
@@ -212,7 +335,7 @@ def run_once(
                 "resume_generation.fail_request_failed",
                 request_id=request_id,
                 original_failure_reason=failure_reason,
-                error=sanitize_text(fail_exc),
+                error=safe_error_reason(fail_exc),
             )
             return EXIT_GENERATION_FAILED
         log_event(
@@ -228,7 +351,7 @@ def run_once(
         log_event(
             "resume_generation.complete_failed",
             request_id=request_id,
-            error=sanitize_text(exc),
+            error=safe_error_reason(exc),
         )
         return EXIT_COMPLETE_FAILED
     log_event("resume_generation.completed", request_id=request_id)
