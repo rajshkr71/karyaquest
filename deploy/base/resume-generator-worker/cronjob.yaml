@@ -7,6 +7,7 @@ metadata:
     app.kubernetes.io/name: resume-generator-worker
 spec:
   schedule: "*/5 * * * *"
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
@@ -25,8 +26,16 @@ spec:
           restartPolicy: Never
           containers:
             - name: resume-generator-worker
-              image: karyaquest/resume-generator-worker@sha256:df669ad1d74ff6f73d25d168bebd015a87895ce6938ef944e7e4c919a185c80a
+              image: karyaquest/resume-generator-worker@sha256:156ed501571b40f25bf03292dc803c3731c9e49fcf881d0b4c78bed873c33650
               imagePullPolicy: IfNotPresent
               env:
                 - name: AGENT_API_URL
                   value: http://agent-api:8000
+                - name: LLM_GATEWAY_URL
+                  value: http://llm-gateway:8000
+                - name: LLM_GATEWAY_PROVIDER
+                  value: openai
+                - name: LLM_GATEWAY_MODEL
+                  value: gpt-5.6-luna
+                - name: LLM_GATEWAY_TIMEOUT_SECONDS
+                  value: "30"
