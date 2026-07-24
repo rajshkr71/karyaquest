@@ -12,6 +12,8 @@ spec:
       app.kubernetes.io/name: llm-gateway
   template:
     metadata:
+      annotations:
+        karyaquest.io/openai-secret-revision: "project-key-v1"
       labels:
         app.kubernetes.io/name: llm-gateway
     spec:
