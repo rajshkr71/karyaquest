@@ -25,6 +25,7 @@ from resume_generator_worker.worker import (
     GenerationInput,
     HttpAgentApiClient,
     HttpLlmGatewayClient,
+    LlmGenerationExecution,
     ResumeGenerationResult,
     WorkerRuntimeError,
     run_once,
@@ -621,7 +622,16 @@ def test_http_llm_client_returns_valid_structured_result(monkeypatch):
 
     result = client.generate(generation_request())
 
-    assert result == ResumeGenerationResult(**valid_generation_output())
+    assert result == LlmGenerationExecution(
+        result=ResumeGenerationResult(**valid_generation_output()),
+        provider="configured-provider",
+        model="configured-model",
+        model_version="model-v1",
+        input_tokens=100,
+        output_tokens=200,
+        latency_ms=300,
+        finish_reason="stop",
+    )
     request, timeout = captured[0]
     assert request.full_url == "http://internal-gateway/generate"
     assert timeout == 12

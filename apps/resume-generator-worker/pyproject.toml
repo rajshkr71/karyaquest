@@ -2,7 +2,9 @@
 name = "resume-generator-worker"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+  "minio==7.2.20",
+]
 
 [project.scripts]
 resume-generator-worker = "resume_generator_worker.worker:main"
