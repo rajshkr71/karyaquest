@@ -12,6 +12,7 @@ from agent_api.main import app
 REQUEST_ID = UUID("2ecee968-87dc-43bf-bf6b-10b5c4cfd379")
 APPROVAL_ID = UUID("6f5be64c-b698-4024-b5df-5a6b730e2807")
 JOB_ID = UUID("e56ee8f6-9e6d-4d12-b826-bf69f4d545bf")
+RESUME_ID = UUID("fb936cab-0161-4780-b69d-bf6bc76a0119")
 CLAIM_TOKEN = UUID("0059f9f3-428c-4eaf-94ba-dc3589756496")
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 
@@ -21,7 +22,7 @@ def request_record(**overrides):
         "id": REQUEST_ID,
         "job_id": JOB_ID,
         "approval_id": APPROVAL_ID,
-        "resume_id": None,
+        "resume_id": RESUME_ID,
         "status": "queued",
         "failure_reason": None,
         "processing_started_at": None,
@@ -40,13 +41,20 @@ def test_create_resume_generation_request_route_returns_queued(monkeypatch) -> N
     monkeypatch.setattr(
         resume_generation_requests,
         "create_resume_generation_request",
-        lambda settings, job_id: request_record(),
+        lambda settings, job_id, resume_id: request_record(resume_id=resume_id),
     )
 
-    result = resume_generation_requests.create_for_job(JOB_ID, object())
+    result = resume_generation_requests.create_for_job(
+        JOB_ID,
+        resume_generation_requests.ResumeGenerationRequestCreate(
+            resume_id=RESUME_ID,
+        ),
+        object(),
+    )
 
     assert result["job_id"] == JOB_ID
     assert result["approval_id"] == APPROVAL_ID
+    assert result["resume_id"] == RESUME_ID
     assert result["status"] == "queued"
 
 
@@ -54,11 +62,17 @@ def test_create_resume_generation_request_missing_job_returns_404(monkeypatch) -
     monkeypatch.setattr(
         resume_generation_requests,
         "create_resume_generation_request",
-        lambda settings, job_id: None,
+        lambda settings, job_id, resume_id: None,
     )
 
     with pytest.raises(HTTPException) as exc:
-        resume_generation_requests.create_for_job(JOB_ID, object())
+        resume_generation_requests.create_for_job(
+            JOB_ID,
+            resume_generation_requests.ResumeGenerationRequestCreate(
+                resume_id=RESUME_ID,
+            ),
+            object(),
+        )
 
     assert exc.value.status_code == 404
     assert exc.value.detail == "job not found"
@@ -67,7 +81,7 @@ def test_create_resume_generation_request_missing_job_returns_404(monkeypatch) -
 def test_create_resume_generation_request_missing_approval_returns_409(
     monkeypatch,
 ) -> None:
-    def missing_approval(settings, job_id):
+    def missing_approval(settings, job_id, resume_id):
         raise db.ResumeGenerationApprovalMissing
 
     monkeypatch.setattr(
@@ -77,7 +91,13 @@ def test_create_resume_generation_request_missing_approval_returns_409(
     )
 
     with pytest.raises(HTTPException) as exc:
-        resume_generation_requests.create_for_job(JOB_ID, object())
+        resume_generation_requests.create_for_job(
+            JOB_ID,
+            resume_generation_requests.ResumeGenerationRequestCreate(
+                resume_id=RESUME_ID,
+            ),
+            object(),
+        )
 
     assert exc.value.status_code == 409
     assert exc.value.detail == "resume generation approval is required"
@@ -86,7 +106,7 @@ def test_create_resume_generation_request_missing_approval_returns_409(
 def test_create_resume_generation_request_duplicate_active_returns_409(
     monkeypatch,
 ) -> None:
-    def duplicate(settings, job_id):
+    def duplicate(settings, job_id, resume_id):
         raise db.ActiveResumeGenerationRequestExists
 
     monkeypatch.setattr(
@@ -96,10 +116,46 @@ def test_create_resume_generation_request_duplicate_active_returns_409(
     )
 
     with pytest.raises(HTTPException) as exc:
-        resume_generation_requests.create_for_job(JOB_ID, object())
+        resume_generation_requests.create_for_job(
+            JOB_ID,
+            resume_generation_requests.ResumeGenerationRequestCreate(
+                resume_id=RESUME_ID,
+            ),
+            object(),
+        )
 
     assert exc.value.status_code == 409
     assert exc.value.detail == "an active resume generation request already exists"
+
+
+def test_create_resume_generation_request_missing_resume_returns_404(
+    monkeypatch,
+) -> None:
+    def missing_resume(settings, job_id, resume_id):
+        raise db.SourceResumeNotFound
+
+    monkeypatch.setattr(
+        resume_generation_requests,
+        "create_resume_generation_request",
+        missing_resume,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        resume_generation_requests.create_for_job(
+            JOB_ID,
+            resume_generation_requests.ResumeGenerationRequestCreate(
+                resume_id=RESUME_ID,
+            ),
+            object(),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "source resume not found"
+
+
+def test_create_payload_requires_resume_id() -> None:
+    with pytest.raises(ValidationError):
+        resume_generation_requests.ResumeGenerationRequestCreate()
 
 
 def test_list_resume_generation_requests(monkeypatch) -> None:
@@ -219,6 +275,7 @@ def test_claim_response_model_includes_claim_token() -> None:
     ).model_dump()
 
     assert response["claim_token"] == CLAIM_TOKEN
+    assert response["resume_id"] == RESUME_ID
 
 
 def test_blank_worker_id_is_rejected() -> None:
@@ -633,9 +690,28 @@ class FakeConnection:
         return self.cursor_instance
 
 
+def test_create_resume_generation_request_rejects_missing_resume(monkeypatch) -> None:
+    cursor = FakeCursor([{"id": JOB_ID}, None])
+    monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
+    monkeypatch.setattr(
+        db.psycopg,
+        "connect",
+        lambda *args, **kwargs: FakeConnection(cursor),
+    )
+
+    with pytest.raises(db.SourceResumeNotFound):
+        db.create_resume_generation_request(object(), JOB_ID, RESUME_ID)
+
+    statements = "\n".join(cursor.queries).lower()
+    assert "from resumes" in statements
+    assert "insert into resume_generation_requests" not in statements
+
+
 def test_create_resume_generation_request_writes_audit_event(monkeypatch) -> None:
     audit = []
-    cursor = FakeCursor([{"id": JOB_ID}, {"id": APPROVAL_ID}, None, request_record()])
+    cursor = FakeCursor(
+        [{"id": JOB_ID}, {"id": RESUME_ID}, {"id": APPROVAL_ID}, None, request_record()]
+    )
     monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
     monkeypatch.setattr(
         db.psycopg,
@@ -650,9 +726,10 @@ def test_create_resume_generation_request_writes_audit_event(monkeypatch) -> Non
         ),
     )
 
-    result = db.create_resume_generation_request(object(), JOB_ID)
+    result = db.create_resume_generation_request(object(), JOB_ID, RESUME_ID)
 
     assert result == request_record()
+    assert "resume_id" in cursor.queries[-1]
     assert audit == [
         (
             "resume_generation.requested",
@@ -661,6 +738,7 @@ def test_create_resume_generation_request_writes_audit_event(monkeypatch) -> Non
             {
                 "job_id": str(JOB_ID),
                 "approval_id": str(APPROVAL_ID),
+                "resume_id": str(RESUME_ID),
                 "request_id": str(REQUEST_ID),
                 "status": "queued",
             },
@@ -890,6 +968,7 @@ def test_new_request_allowed_after_completed_or_failed(
     cursor = FakeCursor(
         [
             {"id": JOB_ID},
+            {"id": RESUME_ID},
             {"id": APPROVAL_ID},
             None,
             request_record(status="queued"),
@@ -903,7 +982,7 @@ def test_new_request_allowed_after_completed_or_failed(
     )
     monkeypatch.setattr(db, "_write_audit_log", lambda *args, **kwargs: None)
 
-    result = db.create_resume_generation_request(object(), JOB_ID)
+    result = db.create_resume_generation_request(object(), JOB_ID, RESUME_ID)
 
     assert result["status"] == "queued"
 
@@ -914,7 +993,12 @@ def test_new_request_blocked_during_queued_or_processing(
     monkeypatch,
 ) -> None:
     cursor = FakeCursor(
-        [{"id": JOB_ID}, {"id": APPROVAL_ID}, request_record(status=active_status)]
+        [
+            {"id": JOB_ID},
+            {"id": RESUME_ID},
+            {"id": APPROVAL_ID},
+            request_record(status=active_status),
+        ]
     )
     monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
     monkeypatch.setattr(
@@ -924,13 +1008,15 @@ def test_new_request_blocked_during_queued_or_processing(
     )
 
     with pytest.raises(db.ActiveResumeGenerationRequestExists):
-        db.create_resume_generation_request(object(), JOB_ID)
+        db.create_resume_generation_request(object(), JOB_ID, RESUME_ID)
 
 
 def test_request_queue_does_not_touch_applications_documents_minio_or_llm(
     monkeypatch,
 ) -> None:
-    cursor = FakeCursor([{"id": JOB_ID}, {"id": APPROVAL_ID}, None, request_record()])
+    cursor = FakeCursor(
+        [{"id": JOB_ID}, {"id": RESUME_ID}, {"id": APPROVAL_ID}, None, request_record()]
+    )
     monkeypatch.setattr(db, "build_conninfo", lambda settings: "")
     monkeypatch.setattr(
         db.psycopg,
@@ -939,7 +1025,7 @@ def test_request_queue_does_not_touch_applications_documents_minio_or_llm(
     )
     monkeypatch.setattr(db, "_write_audit_log", lambda *args, **kwargs: None)
 
-    db.create_resume_generation_request(object(), JOB_ID)
+    db.create_resume_generation_request(object(), JOB_ID, RESUME_ID)
 
     statements = "\n".join(cursor.queries).lower()
     assert "resume_generation_requests" in statements

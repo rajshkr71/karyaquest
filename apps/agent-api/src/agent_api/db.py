@@ -53,6 +53,10 @@ class ResumeGenerationApprovalMissing(Exception):
     pass
 
 
+class SourceResumeNotFound(Exception):
+    pass
+
+
 class ActiveResumeGenerationRequestExists(Exception):
     pass
 
@@ -415,12 +419,17 @@ def list_resume_generation_approvals(settings: Settings) -> list[dict[str, Any]]
 def create_resume_generation_request(
     settings: Settings,
     job_id: UUID,
+    resume_id: UUID,
 ) -> dict[str, Any] | None:
     with psycopg.connect(build_conninfo(settings), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM jobs WHERE id = %s", (job_id,))
             if cur.fetchone() is None:
                 return None
+
+            cur.execute("SELECT id FROM resumes WHERE id = %s", (resume_id,))
+            if cur.fetchone() is None:
+                raise SourceResumeNotFound
 
             cur.execute(
                 f"""
@@ -451,12 +460,12 @@ def create_resume_generation_request(
                 cur.execute(
                     f"""
                     INSERT INTO resume_generation_requests (
-                        job_id, approval_id, status, created_at, updated_at
+                        job_id, approval_id, resume_id, status, created_at, updated_at
                     )
-                    VALUES (%s, %s, 'queued', now(), now())
+                    VALUES (%s, %s, %s, 'queued', now(), now())
                     RETURNING {RESUME_GENERATION_REQUEST_COLUMNS}
                     """,
-                    (job_id, approval["id"]),
+                    (job_id, approval["id"], resume_id),
                 )
             except UniqueViolation as exc:
                 raise ActiveResumeGenerationRequestExists from exc
@@ -468,6 +477,7 @@ def create_resume_generation_request(
                 {
                     "job_id": str(job_id),
                     "approval_id": str(approval["id"]),
+                    "resume_id": str(resume_id),
                     "request_id": str(request["id"]),
                     "status": request["status"],
                 },
