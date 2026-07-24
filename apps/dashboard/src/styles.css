@@ -227,6 +227,25 @@ dd {
   opacity: 0.65;
 }
 
+.resumeSelector {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 16px;
+  color: #526173;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.resumeSelector select {
+  border: 1px solid #cbd6e4;
+  border-radius: 10px;
+  color: #172033;
+  font: inherit;
+  padding: 8px 12px;
+  text-transform: none;
+}
+
 .scoreDetail {
   display: grid;
   grid-template-columns: 1fr 1fr;

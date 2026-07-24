@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  canQueueResumeGeneration,
+  resumeGenerationRequestOptions,
+  resumesUrl,
+} from "./resumeGeneration.js";
 import "./styles.css";
 
 function latestScoresByJob(scores) {
@@ -77,6 +82,8 @@ function App() {
   const [scoresByJob, setScoresByJob] = useState({});
   const [approvals, setApprovals] = useState({});
   const [requests, setRequests] = useState({});
+  const [resumes, setResumes] = useState([]);
+  const [selectedResumeId, setSelectedResumeId] = useState("");
   const [selectedJobId, setSelectedJobId] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [recommendationFilter, setRecommendationFilter] = useState("All");
@@ -103,8 +110,9 @@ function App() {
       fetchJson("/api/job-scores"),
       fetchJson("/api/resume-generation-approvals"),
       fetchJson("/api/resume-generation-requests"),
+      fetchJson(resumesUrl),
     ])
-      .then(([jobsData, scoresData, approvalsData, requestsData]) => {
+      .then(([jobsData, scoresData, approvalsData, requestsData, resumesData]) => {
         const items = Array.isArray(jobsData) ? jobsData : jobsData.items ?? [];
         const scores = Array.isArray(scoresData) ? scoresData : scoresData.items ?? [];
         const approvalRecords = Array.isArray(approvalsData)
@@ -113,10 +121,14 @@ function App() {
         const requestRecords = Array.isArray(requestsData)
           ? requestsData
           : requestsData.items ?? [];
+        const resumeRecords = Array.isArray(resumesData)
+          ? resumesData
+          : resumesData.items ?? [];
         setJobs(items);
         setScoresByJob(latestScoresByJob(scores));
         setApprovals(approvalsByJob(approvalRecords));
         setRequests(requestsByJob(requestRecords));
+        setResumes(resumeRecords);
         setSelectedJobId(items[0]?.id ?? "");
       })
       .catch((error) => {
@@ -125,6 +137,7 @@ function App() {
         setScoresByJob({});
         setApprovals({});
         setRequests({});
+        setResumes([]);
       })
       .finally(() => {
         setIsLoading(false);
@@ -154,6 +167,10 @@ function App() {
   );
 
   useEffect(() => {
+    setSelectedResumeId("");
+  }, [selectedJobId]);
+
+  useEffect(() => {
     if (
       visibleJobs.length > 0
       && !visibleJobs.some((job) => job.id === selectedJobId)
@@ -177,7 +194,12 @@ function App() {
     selectedJob
     && selectedScore?.recommendation === "prepare_application"
     && !selectedApproval;
-  const canQueueResumeRequest = selectedJob && selectedApproval && !hasActiveRequest;
+  const canQueueResumeRequest = canQueueResumeGeneration({
+    selectedJob,
+    selectedApproval,
+    hasActiveRequest,
+    selectedResumeId,
+  });
 
   function requestResumeGenerationApproval(jobId) {
     setActionMessage("");
@@ -204,10 +226,13 @@ function App() {
       });
   }
 
-  function createResumeGenerationRequest(jobId) {
+  function createResumeGenerationRequest(jobId, resumeId) {
     setActionMessage("");
     setRequestingJobId(jobId);
-    fetch(`/api/jobs/${jobId}/resume-generation-requests`, { method: "POST" })
+    fetch(
+      `/api/jobs/${jobId}/resume-generation-requests`,
+      resumeGenerationRequestOptions(resumeId),
+    )
       .then((response) => {
         if (!response.ok) {
           throw new Error(`request creation returned ${response.status}`);
@@ -421,12 +446,30 @@ function App() {
                 </button>
               )}
 
+              {selectedApproval && !hasActiveRequest && (
+                <label className="resumeSelector">
+                  Source resume
+                  <select
+                    value={selectedResumeId}
+                    onChange={(event) => setSelectedResumeId(event.target.value)}
+                  >
+                    <option value="">Select a resume</option>
+                    {resumes.map((resume) => (
+                      <option key={resume.id} value={resume.id}>{resume.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
               {canQueueResumeRequest && (
                 <button
                   className="primaryAction"
                   type="button"
                   disabled={requestingJobId === selectedJob.id}
-                  onClick={() => createResumeGenerationRequest(selectedJob.id)}
+                  onClick={() => createResumeGenerationRequest(
+                    selectedJob.id,
+                    selectedResumeId,
+                  )}
                 >
                   {requestingJobId === selectedJob.id
                     ? "Queueing request..."

@@ -8,6 +8,7 @@ from agent_api.db import (
     ActiveResumeGenerationRequestExists,
     InvalidResumeGenerationRequestTransition,
     ResumeGenerationApprovalMissing,
+    SourceResumeNotFound,
     create_resume_generation_request,
     get_resume_generation_request,
     list_resume_generation_requests,
@@ -38,6 +39,10 @@ class ResumeGenerationRequest(BaseModel):
 
 class ResumeGenerationRequestClaimed(ResumeGenerationRequest):
     claim_token: UUID
+
+
+class ResumeGenerationRequestCreate(BaseModel):
+    resume_id: UUID
 
 
 class ResumeGenerationRequestClaim(BaseModel):
@@ -111,10 +116,16 @@ def _transition(
 )
 def create_for_job(
     job_id: UUID,
+    payload: ResumeGenerationRequestCreate,
     settings: Settings = Depends(get_settings),
 ) -> ResumeGenerationRequest:
     try:
-        request = create_resume_generation_request(settings, job_id)
+        request = create_resume_generation_request(settings, job_id, payload.resume_id)
+    except SourceResumeNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="source resume not found",
+        ) from exc
     except ResumeGenerationApprovalMissing as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
