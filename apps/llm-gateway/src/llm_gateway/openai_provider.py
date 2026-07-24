@@ -37,7 +37,6 @@ class OpenAIResponsesAPI(Protocol):
         *,
         model: str,
         input: str,
-        temperature: float,
         max_output_tokens: int,
     ) -> OpenAIResponse: ...
 
@@ -95,7 +94,6 @@ class OpenAIProvider(LLMProvider):
         response = self._client.responses.create(
             model=request.model,
             input=prompt,
-            temperature=request.temperature,
             max_output_tokens=request.max_output_tokens,
         )
         latency_ms = int((time.perf_counter() - started_at) * 1000)

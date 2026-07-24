@@ -43,14 +43,12 @@ class FakeResponsesAPI:
         *,
         model: str,
         input: str,
-        temperature: float,
         max_output_tokens: int,
     ) -> FakeResponse:
         self.calls.append(
             {
                 "model": model,
                 "input": input,
-                "temperature": temperature,
                 "max_output_tokens": max_output_tokens,
             }
         )
@@ -99,10 +97,10 @@ def test_responses_api_receives_expected_generation_request() -> None:
                 "Generate resume content for the variables below.\n"
                 '{"count":2,"job_title":"Platform Engineer"}'
             ),
-            "temperature": 0.4,
             "max_output_tokens": 128,
         }
     ]
+    assert "temperature" not in client.responses.calls[0]
     assert "metadata" not in client.responses.calls[0]
     assert "must-not-be-sent" not in client.responses.calls[0]["input"]
 
