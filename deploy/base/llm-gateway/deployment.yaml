@@ -25,7 +25,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: llm-gateway
-          image: karyaquest/llm-gateway@sha256:19db2cbbfcda3fcf7be2877e7ec7d4206dc7d19f82037735cbf799a8b77a721f
+          image: karyaquest/llm-gateway@sha256:2e0eaada207186ab267699cd147787dbce59ac04845ef629149d4f6de8914a3e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
